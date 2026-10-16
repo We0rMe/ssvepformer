@@ -1,0 +1,7 @@
+.venv/
+.conda-pkgs/
+cache/
+results/
+tmp/
+__pycache__/
+*.pyc
