@@ -18,38 +18,43 @@ from config import CONFIG, ROOT
 from data import prepare_data, split_subjects
 from evaluate import evaluate, plot_training, save_results, summarize, write_csv, write_json
 from model import SSVEPformer
+from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng, timing_message
 
 
 def seed_everything(cfg):
+    device = configure_device(cfg)
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
-    torch.set_num_threads(cfg.cpu_threads)
-    torch.use_deterministic_algorithms(True)
+    return device
 
 
 def train_epoch(model, optimizer, x, y, cfg, epoch):
     model.train()
+    device = next(model.parameters()).device
     order = torch.randperm(len(y), generator=torch.Generator().manual_seed(cfg.seed + epoch))
-    loss_sum, correct = 0.0, 0
+    loss_sum = torch.zeros((), dtype=torch.float64, device=device)
+    correct = torch.zeros((), dtype=torch.int64, device=device)
     for indices in order.split(cfg.batch_size):
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x[indices])
-        loss = torch.nn.functional.cross_entropy(logits, y[indices])
+        # 特征留在 CPU；只将当前批次送到选定 GPU，避免 FB 全量特征占用显存。
+        batch_x, batch_y = x[indices].to(device), y[indices].to(device)
+        logits = model(batch_x)
+        loss = torch.nn.functional.cross_entropy(logits, batch_y)
         if not torch.isfinite(loss):
             raise FloatingPointError("训练损失非有限")
         loss.backward()
         optimizer.step()
-        loss_sum += float(loss.detach()) * len(indices)
-        correct += int((logits.detach().argmax(1) == y[indices]).sum())
-    return loss_sum / len(y), 100 * correct / len(y)
+        loss_sum += loss.detach().to(torch.float64) * len(indices)
+        correct += (logits.detach().argmax(1) == batch_y).sum()
+    return loss_sum.item() / len(y), 100 * correct.item() / len(y)
 
 
 def save_checkpoint(path, model, optimizer, cfg, signature, epoch, history):
     temp = path.with_suffix(".tmp")
     torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                 "config": cfg.to_dict(), "signature": signature, "epoch": epoch,
-                "history": history, "torch_rng": torch.get_rng_state()}, temp)
+                "history": history, **capture_rng(model)}, temp)
     temp.replace(path)
 
 
@@ -65,7 +70,8 @@ def run_identity(cfg, sources=None):
         raise ValueError("无法核对原始训练函数")
     identity = {"config": settings, "algorithm": hashlib.sha256("\n".join(algorithm).encode()).hexdigest(),
                 "sources": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
-                            for name in ("data.py", "model.py")},
+                            for name in ("data.py", "model.py", "runtime.py")},
+                "runtime": device_info(cfg),
                 "versions": {"python": platform.python_version(), "torch": torch.__version__,
                              "numpy": np.__version__, "scipy": scipy.__version__}}
     return json.loads(json.dumps(identity))
@@ -77,15 +83,7 @@ def check_manifest(cfg, details):
     if path.exists():
         previous = json.loads(path.read_text(encoding="utf-8"))
         if "identity" not in previous:
-            # 仅兼容已完成的旧单折：核对原始配置、数据/模型代码及数值训练函数。
-            old = run_identity(cfg, details / "source")
-            old["config"] = {k: previous["config"][k] for k in identity["config"]}
-            old["versions"] = previous["versions"]
-            if old != identity or not (details.parent / "metrics.csv").exists():
-                raise ValueError("旧实验与当前训练设置不兼容，请使用新的 experiment")
-            previous["identity"] = identity
-            previous["compatibility_note"] = "已核对原始训练设置；保留原始 signature、checkpoint 与代码快照。"
-            write_json(path, previous)
+            raise ValueError("旧版实验不自动迁移到新 GPU 实现，请保留原结果并使用新的 experiment")
         if previous["identity"] != identity:
             raise ValueError("当前训练设置与已有实验不同，请修改 experiment 使用新的目录")
         return previous["signature"]
@@ -97,7 +95,7 @@ def check_manifest(cfg, details):
     write_json(path, manifest)
     source_dir = details / "source"
     source_dir.mkdir(exist_ok=True)
-    for name in ("config.py", "data.py", "model.py", "train.py", "evaluate.py", "README.md", "requirements.txt"):
+    for name in ("config.py", "data.py", "model.py", "train.py", "evaluate.py", "runtime.py", "README.md", "requirements.txt"):
         shutil.copy2(ROOT / name, source_dir / name)
     return signature
 
@@ -124,8 +122,8 @@ def run_single(cfg, features, audit, stop_path):
         try:
             write_json(details / "data_audit.json", audit)
             x, y, test_x, test_y = split_subjects(features, cfg)
-            seed_everything(cfg)
-            model = SSVEPformer(cfg)
+            device = seed_everything(cfg)
+            model = SSVEPformer(cfg).to(device)
             optimizer = torch.optim.SGD(model.parameters(), lr=cfg.learning_rate,
                                         momentum=cfg.momentum, weight_decay=cfg.weight_decay)
             # 所有训练被试各取第一个 block，仅观察训练拟合，绝不包含测试被试。
@@ -140,9 +138,10 @@ def run_single(cfg, features, audit, stop_path):
                     raise ValueError("checkpoint 与实验配置不匹配")
                 model.load_state_dict(state["model"])
                 optimizer.load_state_dict(state["optimizer"])
-                torch.set_rng_state(state["torch_rng"])
+                optimizer_to(optimizer, device)
+                restore_rng(state, model)
                 history, start = state["history"], state["epoch"]
-            message(f"SSVEPformer | CPU | seed={cfg.seed} | test=S{cfg.test_subject} | "
+            message(f"SSVEPformer | {device} | seed={cfg.seed} | test=S{cfg.test_subject} | "
                     f"train={len(y)}, test={len(test_y)} | init_std={cfg.init_std} | epoch {start}/{cfg.epochs}")
             for epoch in range(start + 1, cfg.epochs + 1):
                 if stop_path.exists() or (details / "STOP").exists():
@@ -171,6 +170,10 @@ def run_single(cfg, features, audit, stop_path):
                                          "monitor_acc_dropout_off": row["monitor_acc"]})
                 if monitor:
                     plot_training(history, output)
+                if epoch % 5 == 0:
+                    estimate = timing_message(history, cfg.epochs, cfg.N * cfg.M)
+                    if estimate:
+                        message(estimate)
                 if stop:
                     raise InterruptedError("STOP 文件请求停止")
             # 当前留出被试首次进入模型发生在固定训练轮数结束后。
@@ -194,6 +197,8 @@ def run_single(cfg, features, audit, stop_path):
 
 def run(cfg=CONFIG):
     cfg.validate()
+    configure_device(cfg)
+    print(f"计算设备：{device_info(cfg)}", flush=True)
     details = cfg.output_dir / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
     stop_path = details / "STOP"

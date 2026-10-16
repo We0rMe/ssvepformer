@@ -19,7 +19,7 @@ from train import run, run_identity, run_single, save_checkpoint, seed_everythin
 
 
 def check_schedule(output):
-    cfg = replace(CONFIG, N=3, M=2)
+    cfg = replace(CONFIG, N=3, M=2, device="cpu")
     scheduled = list(cfg.runs())
     assert [(c.test_subject, c.seed) for c in scheduled] == [
         (s, seed) for s in range(1, 4) for seed in (2026, 2027)]
@@ -80,6 +80,18 @@ def check_schedule(output):
         assert "单次" in (summary_cfg.output_dir / "report.md").read_text(encoding="utf-8")
         assert summarize(replace(summary_cfg, seed=2030)) == []
         assert "完成 0 / 4" in (summary_cfg.output_dir / "report.md").read_text(encoding="utf-8")
+        for single in summary_cfg.runs():
+            settings = single.output_dir / "reproducibility" / "settings.json"
+            settings.parent.mkdir(exist_ok=True)
+            settings.write_text(json.dumps({"config": single.to_dict()}), encoding="utf-8")
+        switched = replace(summary_cfg, device="cuda:0")
+        assert len(summarize(switched, evaluation=True)) == 4
+        try:
+            summarize(switched)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("训练汇总必须拒绝混合设备；只有独立复核允许切换推理设备")
 
 
 def check_evaluation(output):
@@ -87,7 +99,7 @@ def check_evaluation(output):
         directory = Path(temp) / "reproducibility"
         directory.mkdir()
         checkpoint = directory / "checkpoint.pt"
-        saved_cfg = replace(CONFIG, test_subject=7, seed=2027)
+        saved_cfg = replace(CONFIG, test_subject=7, seed=2027, device="cpu")
         saved = {"config": saved_cfg.to_dict(), "epoch": saved_cfg.epochs,
                  "model": {}, "history": []}
         torch.save(saved, checkpoint)
@@ -105,6 +117,11 @@ def check_evaluation(output):
             assert evaluate_checkpoint(checkpoint, relocated)
             assert prepare.call_args.args[0].data_dir == relocated
             assert save.call_args.kwargs["output"] == directory / "reevaluation"
+            with patch("evaluate.configure_device", return_value=torch.device("cpu")), \
+                    patch("evaluate.device_info", return_value={"device": "cuda:0"}):
+                assert evaluate_checkpoint(checkpoint, device="cuda:0")
+                assert constructor.call_args.args[0].device == "cuda:0"
+                assert save.call_args.kwargs["output"] == directory / "reevaluation"
             saved["epoch"] = 1
             torch.save(saved, checkpoint)
             prepare.reset_mock()
@@ -115,7 +132,7 @@ def check_evaluation(output):
 def main():
     output = ROOT / "smoke" / "results"
     output.mkdir(exist_ok=True)
-    cfg = CONFIG
+    cfg = replace(CONFIG, device="cpu")
     seed_everything(cfg)
     passed = []
     check_schedule(output)

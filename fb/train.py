@@ -19,6 +19,7 @@ from fb.config import CONFIG
 from fb.data import prepare_data, split_subjects
 from fb.evaluate import plot_training, save_results, summarize
 from fb.model import FBSSVEPformer
+from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng, timing_message
 
 
 def training_plan(cfg):
@@ -29,10 +30,11 @@ def training_plan(cfg):
 
 def check_manifest(cfg, audit, details):
     ignored = {"N", "M", "experiment", "evaluation_checkpoint", "evaluation_data_dir"}
-    sources = ("data.py", "model.py", "train.py", "evaluate.py",
+    sources = ("data.py", "model.py", "train.py", "evaluate.py", "runtime.py",
                "fb/data.py", "fb/model.py", "fb/train.py", "fb/evaluate.py")
     identity = {"config": {k: v for k, v in cfg.to_dict().items() if k not in ignored},
                 "cache_id": audit["cache_id"],
+                "runtime": device_info(cfg),
                 "sources": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in sources},
                 "versions": {"python": platform.python_version(), "torch": torch.__version__,
                              "numpy": np.__version__, "scipy": scipy.__version__}}
@@ -58,7 +60,7 @@ def save_checkpoint(path, model, optimizer, cfg, signature, cache_id, stage_inde
              "optimizer": optimizer.state_dict(), "config": cfg.to_dict(), "signature": signature,
              "cache_id": cache_id, "stage_index": stage_index, "epoch": epoch, "history": history,
              "training_complete": stage_index == cfg.subbands and epoch == cfg.joint_epochs,
-             "torch_rng": torch.get_rng_state()}
+             **capture_rng(model)}
     temporary = path.with_suffix(".tmp")
     torch.save(saved, temporary)
     temporary.replace(path)
@@ -73,7 +75,7 @@ def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id
         if saved["signature"] != signature or saved["cache_id"] != cache_id:
             raise ValueError("FB checkpoint 与当前设置或数据不匹配")
         model.load_state_dict(saved["model"])
-        torch.set_rng_state(saved["torch_rng"])
+        restore_rng(saved, model)
         history = saved["history"]
     for stage_index, (stage, band, epochs) in enumerate(training_plan(cfg)):
         if saved is not None and stage_index < saved["stage_index"]:
@@ -87,6 +89,7 @@ def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id
         start = 0
         if saved is not None and stage_index == saved["stage_index"]:
             optimizer.load_state_dict(saved["optimizer"])
+            optimizer_to(optimizer, next(model.parameters()).device)
             start = saved["epoch"]
         message(f"{stage}: {start}/{epochs} epoch | {'全网联合训练' if band is None else '独立子网预训练'}")
         for epoch in range(start + 1, epochs + 1):
@@ -117,6 +120,10 @@ def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id
                     f"{suffix} | {history[-1]['seconds']:.1f}s")
             if monitor:
                 plot_training(history, details.parent)
+            if epoch % 5 == 0:
+                estimate = timing_message([r for r in history if r["stage"] == stage], epochs, cfg.N * cfg.M)
+                if estimate:
+                    message(f"{stage} 阶段：{estimate}")
             if stop:
                 raise InterruptedError("STOP：已保存当前阶段，停止整个 FB 计划")
     return history
@@ -138,8 +145,8 @@ def run_single(cfg, features, audit, stop_path):
             return True
         try:
             x, y, test_x, test_y = split_subjects(features, cfg)
-            seed_everything(cfg)
-            model = FBSSVEPformer(cfg)
+            device = seed_everything(cfg)
+            model = FBSSVEPformer(cfg).to(device)
             monitor_indices = torch.cat([torch.arange(i * cfg.classes * cfg.blocks,
                                                       i * cfg.classes * cfg.blocks + cfg.classes)
                                          for i in range(cfg.subjects - 1)])
@@ -168,6 +175,8 @@ def run_single(cfg, features, audit, stop_path):
 
 def run(cfg=CONFIG):
     cfg.validate()
+    configure_device(cfg)
+    print(f"FB 计算设备：{device_info(cfg)}", flush=True)
     details = cfg.output_dir / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
     stop_path = details / "STOP"

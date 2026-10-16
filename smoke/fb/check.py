@@ -202,7 +202,7 @@ def check_scheduler(cfg, output):
 def main():
     output = ROOT / "smoke" / "fb" / "results"
     output.mkdir(parents=True, exist_ok=True)
-    cfg = replace(CONFIG, cpu_threads=1)
+    cfg = replace(CONFIG, cpu_threads=1, device="cpu")
     seed_everything(cfg)
     before = protected_hashes()
     designs, real = check_filters(cfg)
@@ -218,7 +218,7 @@ def main():
               "Resume within pretraining, at stage boundary, and within joint training is bit-exact",
               "Final FB checkpoint re-evaluation and reports work; incomplete checkpoint never tests",
               "STOP stops the whole plan; N/M expansion preserves signature; incompatible subbands rejected",
-              "Five running SSVEPformer core scripts unchanged"]
+              "FB checks do not modify SSVEPformer core scripts"]
     write_json(output / "checks.json", {"passed": passed, "filter_orders": [d["prototype_order"] for d in designs],
                                         "protected_hashes": before, "formal_training_started": False})
     for item in passed:

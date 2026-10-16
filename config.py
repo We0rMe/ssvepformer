@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parent  # 项目根目录，自动定位，不�
 @dataclass(frozen=True)
 class Config:
     data_dir: Path = Path(r"G:\SSVEP\data\benchmark")  # 含 S1.mat…S35.mat 和通道/频率文件的数据目录。
-    experiment: str = "ssvepformer_loso"  # results 下的实验总目录；改变实验设置时换新名称。
+    experiment: str = "ssvepformer_loso_cuda"  # 新 GPU 实验目录；旧 CPU 结果保留在 ssvepformer_loso。
+    device: str = "cuda:0"  # cpu：CPU；cuda/cuda:0：第一张卡；cuda:1：第二张卡。无可用 GPU 时明确报错。
     N: int = 35  # 留出折数：依次测试 S1…SN；其余所有被试训练，不是只使用前 N 名被试。
     M: int = 1  # 每折独立训练的种子数，使用 seed…seed+M-1，不从其他种子模型继续训练。
     seed: int = 2026  # 起始随机种子；M=1 时所有折均使用此种子。
@@ -72,9 +73,11 @@ class Config:
         return 2 * (round((self.frequency_range[1] - self.frequency_range[0]) / self.frequency_resolution) + 1)
 
     def validate(self):
+        assert self.device in ("cpu", "cuda") or (
+            self.device.startswith("cuda:") and self.device[5:].isdigit()), "device 应为 cpu、cuda 或 cuda:编号"
         assert isinstance(self.N, int) and 1 <= self.N <= self.subjects, "N 必须在 1…subjects 之间"
         assert isinstance(self.M, int) and self.M >= 1, "M 必须为正整数"
-        assert isinstance(self.seed, int) and 0 <= self.seed <= 2**32 - self.M
+        assert isinstance(self.seed, int) and 0 <= self.seed < 2**32
         assert self.subjects == 35, "当前加载器针对完整的 35 被试 Benchmark；折数请改 N"
         assert 1 <= self.test_subject <= self.subjects
         assert self.classes == 40 and self.blocks == 6 and self.sample_rate == 250
@@ -95,6 +98,7 @@ class Config:
 
     def runs(self):
         """每折独立配置；修改 N/M 不改变已有单折的路径与训练参数。"""
+        assert self.seed + self.M <= 2**32, "连续种子不能超出 NumPy 支持范围"
         for subject in range(1, self.N + 1):
             for seed in range(self.seed, self.seed + self.M):
                 yield replace(self, test_subject=subject, seed=seed,

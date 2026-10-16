@@ -11,6 +11,7 @@ from evaluate import evaluate, itr, plt, summarize as summarize_base, write_csv,
 from fb.config import CONFIG, FBConfig
 from fb.data import prepare_data, split_subjects
 from fb.model import FBSSVEPformer
+from runtime import configure_device, device_info
 
 
 def plot_training(history, output):
@@ -68,7 +69,7 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
 | 正确 / 总试次 | {test['correct']} / {test['total']} |
 | 最终训练集 ACC（Dropout OFF） | {train['acc_percent']:.2f}% |
 
-S{cfg.test_subject} 留出测试，其余 {cfg.subjects - 1} 名被试训练；seed={cfg.seed}，窗口 {cfg.duration:g} 秒。
+S{cfg.test_subject} 留出测试，其余 {cfg.subjects - 1} 名被试训练；seed={cfg.seed}，窗口 {cfg.duration:g} 秒，设备 {cfg.device}。
 {cfg.subbands} 个独立子网各预训练 {cfg.epochs} 轮，再联合训练 {cfg.joint_epochs} 轮。
 训练及训练集监测共 {sum(r['seconds'] for r in history) / 60:.1f} 分钟；使用最后一轮联合模型。
 预训练阶段不评估测试被试；测试集不参与梯度计算、早停或选模。
@@ -83,20 +84,22 @@ training.png 按子网预训练和联合训练分别绘图。橙线来自固定�
     return metric
 
 
-def summarize(cfg):
-    rows = summarize_base(cfg)
+def summarize(cfg, *, evaluation=False):
+    rows = summarize_base(cfg, evaluation=evaluation)
     report = cfg.output_dir / "report.md"
     report.write_text(report.read_text(encoding="utf-8").replace(
         "# SSVEPformer · LOSO 汇总", "# FB-SSVEPformer · LOSO 汇总", 1), encoding="utf-8")
     return rows
 
 
-def evaluate_checkpoint(checkpoint, data_dir=None):
+def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     checkpoint = Path(checkpoint).resolve()
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if saved.get("model_name") != "FB-SSVEPformer":
         raise ValueError("请提供 FB-SSVEPformer 的 checkpoint，不能使用基础模型 checkpoint")
     values = saved["config"].copy()
+    trained_device = values.get("device", "cpu")
+    values["device"] = device or trained_device
     for key in ("data_dir", "evaluation_checkpoint", "evaluation_data_dir"):
         if values.get(key) is not None:
             values[key] = Path(values[key])
@@ -107,20 +110,22 @@ def evaluate_checkpoint(checkpoint, data_dir=None):
     if not saved["training_complete"] or saved["stage_index"] != cfg.subbands or saved["epoch"] != cfg.joint_epochs:
         print(f"跳过未完成联合训练的模型：{checkpoint}", flush=True)
         return False
-    torch.set_num_threads(cfg.cpu_threads)
+    selected_device = configure_device(cfg)
     features, audit = prepare_data(cfg)
     if data_dir is None and audit["cache_id"] != saved["cache_id"]:
         raise ValueError("原始数据/处理代码发生变化；独立复核请显式设置 evaluation_data_dir")
     x, y, test_x, test_y = split_subjects(features, cfg)
-    model = FBSSVEPformer(cfg)
+    model = FBSSVEPformer(cfg).to(selected_device)
     model.load_state_dict(saved["model"])
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
-    output = checkpoint.parent.parent if data_dir is None else checkpoint.parent / "reevaluation"
+    same_context = data_dir is None and cfg.device == trained_device
+    output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, model, saved["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output)
     write_json(output / "reproducibility" / "evaluation.json",
-               {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir), "cache_id": audit["cache_id"]})
+               {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir), "cache_id": audit["cache_id"],
+                "trained_device": trained_device, "evaluation_runtime": device_info(cfg)})
     print(f"FB S{cfg.test_subject}, seed={cfg.seed}: ACC={metric['ACC_percent']:.2f}%, "
           f"ITR={metric['ITR_bits_min']:.2f} bits/min", flush=True)
     return True
@@ -132,7 +137,7 @@ def main(cfg=CONFIG):
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
         with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-            evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir)
+            evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
         return
     cfg.validate()
     details = cfg.output_dir / "reproducibility"
@@ -143,8 +148,8 @@ def main(cfg=CONFIG):
             checkpoint = single.output_dir / "reproducibility" / "checkpoint.pt"
             if checkpoint.exists():
                 with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-                    count += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir)
-        summarize(cfg)
+                    count += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
+        summarize(cfg, evaluation=True)
     print(f"FB 已复核 {count} / {cfg.N * cfg.M} 个模型，其余尚未完成。", flush=True)
 
 

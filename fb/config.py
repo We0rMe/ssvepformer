@@ -8,7 +8,8 @@ from config import Config
 
 @dataclass(frozen=True)
 class FBConfig(Config):
-    experiment: str = "fb_ssvepformer_loso"  # 独立结果目录，名称须以 fb_ 开头。
+    experiment: str = "fb_ssvepformer_loso_cuda"  # 新 GPU 实验目录，名称须以 fb_ 开头。
+    device: str = "cuda:0"  # 可改为 cuda:1 使用第二张卡；本机无 GPU 检查时使用 cpu。
     N: int = 1  # 默认先评估 S1；改为 35 即完整 LOSO，其余被试始终全部参与训练。
     M: int = 1  # 每折种子数，依次使用 seed…seed+M-1。
     seed: int = 2026  # 起始随机种子；每折从头初始化全部子网与融合层。

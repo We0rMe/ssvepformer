@@ -11,6 +11,7 @@ import torch
 from filelock import FileLock
 
 from config import CONFIG, ROOT, Config
+from runtime import configure_device, device_info
 
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "cache" / ".matplotlib"))
 import matplotlib
@@ -50,17 +51,19 @@ def itr(accuracy, cfg):
 @torch.inference_mode()
 def evaluate(model, x, y, cfg):
     model.eval()
-    predictions, loss = [], 0.0
+    device = next(model.parameters()).device
+    predictions = []
+    loss = torch.zeros((), dtype=torch.float64, device=device)
     for start in range(0, len(y), cfg.batch_size):
-        batch_y = y[start:start + cfg.batch_size]
-        logits = model(x[start:start + cfg.batch_size])
+        batch_y = y[start:start + cfg.batch_size].to(device)
+        logits = model(x[start:start + cfg.batch_size].to(device))
         if not torch.isfinite(logits).all():
             raise FloatingPointError("评估输出含非有限值")
-        loss += float(torch.nn.functional.cross_entropy(logits, batch_y, reduction="sum"))
+        loss += torch.nn.functional.cross_entropy(logits, batch_y, reduction="sum").to(torch.float64)
         predictions.append(logits.argmax(1))
-    predictions = torch.cat(predictions).numpy()
-    correct = int((predictions == y.numpy()).sum())
-    return {"loss": loss / len(y), "acc_percent": 100 * correct / len(y),
+    predictions = torch.cat(predictions).cpu().numpy()
+    correct = int((predictions == y.cpu().numpy()).sum())
+    return {"loss": loss.item() / len(y), "acc_percent": 100 * correct / len(y),
             "correct": correct, "total": len(y)}, predictions
 
 
@@ -116,7 +119,7 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
 | 最终训练集 ACC（关闭 Dropout） | {train['acc_percent']:.2f}% |
 | 最后一轮训练 ACC（开启 Dropout） | {history[-1]['train_acc']:.2f}% |
 
-设置：S{cfg.test_subject} 测试，其余 {cfg.subjects - 1} 名被试训练；种子 {cfg.seed}；{cfg.duration:g} 秒；{cfg.epochs} epoch；CPU。
+设置：S{cfg.test_subject} 测试，其余 {cfg.subjects - 1} 名被试训练；种子 {cfg.seed}；{cfg.duration:g} 秒；{cfg.epochs} epoch；设备 {cfg.device}。
 训练与训练集监测耗时约 {minutes:.1f} 分钟。固定最后一轮模型，测试集未参与早停或选模。
 
 `training.png` 中蓝线是各训练批次开启 Dropout 的指标；橙线是固定训练子集关闭 Dropout 的监测指标，**不是验证集**。
@@ -131,7 +134,7 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
     return metric
 
 
-def summarize(cfg):
+def summarize(cfg, *, evaluation=False):
     """按被试与种子分别汇总；未完成的计划明确标为部分结果。"""
     rows = []
     for single in cfg.runs():
@@ -148,6 +151,8 @@ def summarize(cfg):
             saved = json.loads(settings.read_text(encoding="utf-8"))["config"]
             current = json.loads(json.dumps(single.to_dict()))
             ignored = {"N", "M", "experiment", "evaluation_checkpoint", "evaluation_data_dir"}
+            if evaluation:
+                ignored.add("device")  # 更换推理设备时仍汇总原实验指标；训练入口继续严格检查设备。
             if any(saved[k] != current[k] for k in saved if k not in ignored):
                 raise ValueError(f"{single.output_dir.name} 的设置不匹配，请使用新的 experiment")
         rows.append(row)
@@ -187,12 +192,14 @@ def summarize(cfg):
     return rows
 
 
-def evaluate_checkpoint(checkpoint, data_dir=None):
+def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     from data import prepare_data, split_subjects
     from model import SSVEPformer
     checkpoint = Path(checkpoint).resolve()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     values = state["config"].copy()
+    trained_device = values.get("device", "cpu")
+    values["device"] = device or trained_device
     for key in ("data_dir", "evaluation_checkpoint", "evaluation_data_dir"):
         if values.get(key) is not None:
             values[key] = Path(values[key])
@@ -203,20 +210,22 @@ def evaluate_checkpoint(checkpoint, data_dir=None):
         print(f"跳过未完成模型：{checkpoint} ({state['epoch']}/{cfg.epochs})", flush=True)
         return False
     cfg.validate()
-    torch.set_num_threads(cfg.cpu_threads)
+    selected_device = configure_device(cfg)
     features, audit = prepare_data(cfg)
     x, y, test_x, test_y = split_subjects(features, cfg)
-    model = SSVEPformer(cfg)
+    model = SSVEPformer(cfg).to(selected_device)
     model.load_state_dict(state["model"])
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
-    # 指定数据目录的复核另存，避免替换原实验的正式指标。
-    output = checkpoint.parent.parent if data_dir is None else checkpoint.parent / "reevaluation"
+    # 更换数据目录或推理设备的复核另存，避免替换原实验的正式指标。
+    same_context = data_dir is None and cfg.device == trained_device
+    output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, state["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output=output)
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir),
-                "test_subject": cfg.test_subject, "epoch": state["epoch"], "cache_id": audit["cache_id"]})
+                "test_subject": cfg.test_subject, "epoch": state["epoch"], "cache_id": audit["cache_id"],
+                "trained_device": trained_device, "evaluation_runtime": device_info(cfg)})
     print(f"S{cfg.test_subject:02d}, seed={cfg.seed}: ACC={metric['ACC_percent']:.2f}%, "
           f"ITR={metric['ITR_bits_min']:.2f} bits/min | {output / 'report.md'}", flush=True)
     return True
@@ -228,7 +237,7 @@ def main(cfg=CONFIG):
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
         with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-            evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir)
+            evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
         return
     cfg.validate()
     details = cfg.output_dir / "reproducibility"
@@ -241,8 +250,8 @@ def main(cfg=CONFIG):
                 missing += 1
                 continue
             with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-                completed += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir)
-        summarize(cfg)
+                completed += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
+        summarize(cfg, evaluation=True)
     print(f"复核完成 {completed} 个模型；{missing} 个尚无 checkpoint。", flush=True)
 
 

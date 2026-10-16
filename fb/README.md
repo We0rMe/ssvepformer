@@ -4,10 +4,10 @@ FB = Filter Bank，即滤波器组。它让多个独立的 SSVEPformer 分别观
 
 ## 与当前 SSVEPformer 的关系
 
-本实现单独放在 `fb/` 下。根目录的五个核心脚本保持不变，正在执行的基础模型训练不需要重启。
+本实现单独放在 `fb/` 下。原 CPU 任务已保存并停止；两个模型均已适配 CPU/CUDA。
 共用原始 MAT 读取、通道顺序、FFT、被试隔离、SSVEPformer 子网、单轮 SGD 和 ACC/ITR 计算。
 FB 的缓存以 `fb_` 开头，实验目录也以 `fb_` 开头，不使用基础模型的 checkpoint。
-现有环境已具备全部依赖，无需安装或更新软件包。
+设备、CUDA 随机状态和优化器缓冲区由根目录 `runtime.py` 共用。服务器环境准备见根 README。
 
 | 文件 | 用途 |
 |---|---|
@@ -69,28 +69,30 @@ FFT 用实际窗口采样点数归一化；补零加密频率采样网格，并�
 继承的 `filter_order` 不用于 FB；`bandpass` 固定为 False，表示不额外串联基础 Butterworth。
 `frequency_range` 在 FB 中仅控制 FFT 特征范围；`band_step/band_high` 控制子带通带。
 
-默认 N=1、M=1、seed=2026，先评估一个留出被试。N=35 才运行完整 LOSO。
+默认 cuda:0、N=1、M=1、seed=2026，先评估一个留出被试。N=35 才运行完整 LOSO。
+`device="cuda:1"` 可使用第二张卡；无 GPU 的本地检查设置 cpu，不能依赖自动回退。
 每折仍然使用其余全部 34 名被试训练；同一折的不同种子从头初始化，不共享训练所得权重。
 每次默认实际执行 3×100+20=320 个阶段内 epoch，其中联合 epoch 同时训练三个子网，耗时高于基础模型。
 
-当前基础模型仍在运行，FB 代码准备完成后由你决定启动时间；本次实现不自动启动 FB 正式任务。
+本次不自动启动 FB 正式任务，训练由你在服务器终端启动。
 准备运行时，在项目根目录 PowerShell 中执行：
 
 ```powershell
 Set-Location G:\SSVEP\SSVEPformer
-.\.venv\python.exe -u -m fb.train
+conda activate ssvepformer-gpu
+python -u -m fb.train
 ```
 
 日志直接显示在当前终端。不能用 `python fb/train.py` 代替 `-m fb.train`，否则同名模块的导入路径可能混淆。
 训练完成自动测试，无需再运行评估才能得到结果。另行复核保存模型：
 
 ```powershell
-.\.venv\python.exe -u -m fb.evaluate
+python -u -m fb.evaluate
 ```
 
 默认复核 FB 当前 N/M 计划中已完成联合训练的模型，预训练 checkpoint 不用于测试。
 单模型复核可将 `evaluation_checkpoint` 改为 `Path(r"完整的 FB checkpoint.pt 路径")`。
-数据路径默认从 checkpoint 读取；同一份 Benchmark 迁移后可同名覆盖 `evaluation_data_dir`。指定新数据路径的复核结果另存至 checkpoint 旁的 `reevaluation/`，不会改写原成绩。
+数据路径默认从 checkpoint 读取；同一份 Benchmark 迁移后可同名覆盖 `evaluation_data_dir`。评估使用当前配置的 device，指定新数据路径或改变设备的复核结果另存至 checkpoint 旁的 `reevaluation/`，不会改写原成绩。
 
 ## 缓存、恢复和输出
 
@@ -99,7 +101,7 @@ Set-Location G:\SSVEP\SSVEPformer
 “每折独立配置”是为每次实验填写测试被试、种子、结果路径，并非复制或重新处理整套原始数据。
 
 ```text
-results/fb_ssvepformer_loso/
+results/fb_ssvepformer_loso_cuda/
   report.md, summary.csv                 # 总进度和均值 ± 标准差
   reproducibility/plan.json
   S01_seed2026/
@@ -108,11 +110,11 @@ results/fb_ssvepformer_loso/
     reproducibility/                    # 配置、数据审查、训练记录、预测、融合权重、模型、代码快照
 ```
 
-每个实验只保留一个最新 checkpoint，包含所有子网、融合层、当前阶段的优化器、阶段编号、epoch 和随机数状态。
+每个实验只保留一个最新 checkpoint，包含所有子网、融合层、当前阶段的优化器、阶段编号、epoch 和 CPU/所选 CUDA 设备的随机数状态。
 中断后重新运行原命令会恢复当前阶段，不重复已完成的子网；完成项会跳过。
 只增减 N/M 可补跑/缩小计划；更换子带数、滤波或训练设置时请换新的 `experiment`。
 
-创建 `results/fb_ssvepformer_loso/reproducibility/STOP` 可在 epoch 边界保存并停止整个 FB 计划。
+创建 `results/fb_ssvepformer_loso_cuda/reproducibility/STOP` 可在 epoch 边界保存并停止整个 FB 计划。
 也可在当前单折的 reproducibility 中创建 STOP；恢复前删除它。Ctrl+C 恢复至最近一次定期保存的 checkpoint。
 FB 的 STOP、锁、日志与基础模型完全分开。
 
@@ -121,3 +123,4 @@ FB 的 STOP、锁、日志与基础模型完全分开。
 ITR 的决策时间是窗口长度加 0.5 秒。总报告区分被试间与种子间标准差，只有一个结果时不报告标准差。
 
 轻量检查脚本：`python -m smoke.fb.check`。只使用少量合成/训练侧数据，单线程，不生成正式实验或全量 FB 缓存；结果均在 `smoke/fb/results/`。
+服务器另运行 `python -m smoke.gpu.check`，实际检测 GPU 上的计算、评估与断点恢复；本机无 GPU 时该部分会明确跳过。

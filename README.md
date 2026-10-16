@@ -1,12 +1,74 @@
 # SSVEPformer：Benchmark LOSO 评估
 
-默认 **SSVEPformer、N=35 折、M=1 个种子、seed=2026、1 秒、100 epoch**。
+默认 **SSVEPformer、cuda:0、N=35 折、M=1 个种子、seed=2026、1 秒、100 epoch**。
 第 i 折仅用 Si 测试，其他全部 34 名被试训练；依次运行 S1…SN，每折依次使用 seed…seed+M-1。
-各折/种子均独立初始化模型和优化器，不运行 FB 模型。已完成的 S1/2026 结果已保留，后续启动会跳过。
+各折/种子均独立初始化模型和优化器，不运行 FB 模型。
+新 GPU 实验使用 `ssvepformer_loso_cuda`，从 S1 重新训练；原 CPU 实验 `ssvepformer_loso` 独立保留，不混合统计。
+2026-10-16 原 CPU 任务已完成 S1–S25，并在 S26 第 24 轮保存后停止；STOP 文件仍保留在原实验中。
+
+## Windows GPU 服务器
+
+建议在服务器上重新训练完整 35 折，保证同一实验的设备与数值设置一致。旧 CPU 成绩与 checkpoint 保留作对照。
+CPU→GPU 续练在技术上可迁移参数，但不同设备不保证相同随机轨迹；本实现不自动接受旧版/跨设备训练断点。
+同一设备、实现、配置及环境下的新版实验支持正常断点恢复。单独评估保存的模型可以选择不同设备。
+
+先在本机提交并推送代码，然后在服务器 Conda 终端中克隆项目、新建环境，无需复制 `.venv`：
+
+```powershell
+git clone "你的私人仓库URL" SSVEPformer
+cd SSVEPformer
+conda create -n ssvepformer-gpu python=3.11 pip -y
+conda activate ssvepformer-gpu
+python -m pip install -r requirements.txt
+python -m pip check
+nvidia-smi
+python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available(), torch.cuda.device_count())"
+```
+
+环境使用 64 位 Python 3.11、`torch==2.14.1+cu126`；本机 CPU 环境没有被重新安装。
+把 Benchmark 数据单独复制到服务器，再修改 `config.py` 的 `data_dir` 为实际位置。
+检查 `device="cuda:0"`、`experiment="ssvepformer_loso_cuda"`、`N=35`、`M=1`、`seed=2026`。
+GPU 不可用或编号错误会直接报错，不会悄悄退回 CPU。
+
+在服务器先运行设备检查，然后启动训练：
+
+```powershell
+python -u -m smoke.gpu.check
+python -u train.py
+# 训练结束已自动测试；需要重新复核模型时：
+python -u evaluate.py
+```
+
+设备检查使用合成数据，对 CPU 及所有可见 GPU 分别测试两个模型的前向/反向、评估和断点恢复；无正式训练。
+结果位于 `smoke/gpu/results/checks.json`。本机没有 GPU 时明确记录 CUDA 检查为 SKIPPED，不能把它当成服务器实测通过。
+
+`device="cuda:1"` 使用第二张显卡；`device="cpu"` 使用 CPU。单个进程仅使用所选的一张卡，不会自动双卡分摊 35 折。
+如需同时训练两个模型，可在启动前把基础模型设置为 cuda:0，把 `fb/config.py` 中的 FB 设置为 cuda:1，再分别运行两个入口。
+两模型使用独立结果目录；不要同时对同一个实验目录训练和评估。
+
+保持 FP32、原 batch=128 和优化器参数，启用确定性算法，关闭 AMP/TF32 和 cuDNN 自动测速。
+CPU 完成滤波/FFT，GPU 完成模型计算。模型、当前批次及优化器动量在所选设备上；完整特征缓存留在 CPU。
+checkpoint 保存 CPU 随机状态及当前 CUDA 设备的随机状态；配置、GPU 名称、CUDA/cuDNN 和精度设置记入复现资料。
+即便同一种子，也不承诺 CPU 与 GPU、不同硬件/软件环境间逐位一致，见 [PyTorch 可复现性说明](https://docs.pytorch.org/docs/2.14/notes/randomness.html)。
+
+## 训练需要多久
+
+服务器尚未实测，不能只凭 RTX 4090D 型号确定耗时。SSVEPformer 的 35 折单种子共 3500 个 epoch，每 epoch 为 64 个训练 batch。
+日志每 5 轮用近期实际耗时外推训练总时长（含训练监测，排除首轮预热），不会读取测试准确率来选择配置。
+
+| 服务器实测平均每轮耗时 | 3500 轮训练部分 |
+|---|---:|
+| 2 秒 | 约 1.94 小时 |
+| 5 秒 | 约 4.86 小时 |
+| 10 秒 | 约 9.72 小时 |
+
+这些是条件计算，不是显卡速度预测；另加预处理、保存/绘图、最终评估开销。
+直接开始正式训练即可测得速度，前几轮会继续用于这次实验，不需要为测速重新开始。
+FB 的各子网预训练和联合训练分别估时，不能把某一阶段的速度直接当成 FB 全部阶段速度。
 
 ## 使用
 
-在项目目录的 PowerShell 中运行，日志直接显示在当前终端：
+服务器激活上述环境后直接使用 `python`；本地现有 CPU 环境则先设 `device="cpu"` 和一个新的实验名，再使用 `.venv\python.exe`。日志显示在当前终端：
 
 ```powershell
 Set-Location G:\SSVEP\SSVEPformer
@@ -21,8 +83,7 @@ Set-Location G:\SSVEP\SSVEPformer
 实验名 `experiment` 决定结果总目录；改变数据处理、模型或训练设置时使用新实验名，避免混合结果。
 只增减 N/M 不影响已有单折，增加后补跑缺少的实验；减少后汇总只包括当前计划。
 日志就在运行命令的当前终端中输出，不启动其他窗口或后台程序。不要同时启动训练与批量评估。
-CPU 环境已建立在 `.venv/`，无需激活即可使用。
-安装依赖：`.\.venv\python.exe -m pip install -r requirements.txt`。
+本机 CPU 环境已建立在 `.venv/`，无需激活即可使用，不要用当前面向 GPU 的 requirements 覆盖它。
 
 `train.py` 在每次训练结束后自动测试并更新汇总，因此不必额外运行评估才能得到结果。
 完成后如需重新从保存的模型复核，可运行：
@@ -31,17 +92,17 @@ CPU 环境已建立在 `.venv/`，无需激活即可使用。
 .\.venv\python.exe -u evaluate.py
 ```
 
-评估不训练模型，不使用当前配置重新构建实验参数，而是读取各 checkpoint 保存的配置：
+评估不训练模型，模型/预处理参数读取 checkpoint，执行设备使用当前配置的 device：
 
 - `evaluation_checkpoint = None`：按当前 experiment、N、M、seed 定位所有计划中的模型；跳过不存在或未训练完的模型。
-- 只评估某个模型：例如 `evaluation_checkpoint = ROOT / "results/ssvepformer_loso/S01_seed2026/reproducibility/checkpoint.pt"`。
+- 只评估某个模型：例如 `evaluation_checkpoint = ROOT / "results/ssvepformer_loso_cuda/S01_seed2026/reproducibility/checkpoint.pt"`。
 - `evaluation_data_dir = None`：使用该模型保存的 `data_dir`；如果同一份 Benchmark 数据迁移，可填写 `Path(r"D:\data\benchmark")`。目录需包含全部 35 个 MAT 文件和辅助文件。它不支持任意格式的新数据集。
-- 留出被试编号来自 checkpoint，不由当前 `test_subject` 指定。数据迁移目录的复核报告另存到 checkpoint 所在目录的 `reevaluation/`，不覆盖原实验成绩，也不纳入原实验汇总。
+- 留出被试编号来自 checkpoint，不由当前 `test_subject` 指定。更换数据目录或评估设备时，复核报告另存到 checkpoint 所在目录的 `reevaluation/`，不覆盖原实验成绩，也不纳入原实验汇总。
 
 默认复核更新该折的报告与图像；批量模式同时更新总汇总，指定单模型时不更新总汇总。
 快速检查：`.\.venv\python.exe smoke\check.py`，输出只放在 `smoke/results/`。
 
-主目录只有五个功能脚本：
+主目录保留五个功能入口/模块，增加一个两个模型共用的设备辅助模块：
 
 | 文件 | 职责 |
 |---|---|
@@ -50,12 +111,13 @@ CPU 环境已建立在 `.venv/`，无需激活即可使用。
 | `model.py` | SSVEPformer |
 | `train.py` | 训练、训练集监测、断点与日志 |
 | `evaluate.py` | 模型评估、ACC/ITR、CSV、报告和图片 |
+| `runtime.py` | CPU/CUDA 设置、随机状态恢复、运行设备记录、耗时提示 |
 
 ## 输出
 
 ```text
 results/
-  ssvepformer_loso/
+  ssvepformer_loso_cuda/
     report.md                  # 完成进度、各个种子下的被试均值 ± 标准差
     summary.csv                # 每折每种子一行关键测试指标
     reproducibility/plan.json  # 当前调度计划
@@ -74,6 +136,7 @@ results/
         training.log
         source/
   previous_s01/                # 旧实现的结果，单独归档
+  ssvepformer_loso/            # 已停止的 CPU 实验，保留结果和 S26 断点
 smoke/
   check.py
   results/                     # 新的检查与初始化诊断
@@ -87,7 +150,7 @@ smoke/
 如需在 epoch 结束处保存并停止整个计划，可在另一个 PowerShell 终端执行：
 
 ```powershell
-New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso\reproducibility\STOP -ItemType File
+New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso_cuda\reproducibility\STOP -ItemType File
 ```
 
 也支持在当前单折的 reproducibility 内创建 STOP；停止后不会继续下一折或下一个种子。
