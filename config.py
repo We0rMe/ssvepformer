@@ -10,9 +10,10 @@ ROOT = Path(__file__).resolve().parent  # 项目根目录，自动定位，不�
 class Config:
     data_dir: Path = Path(r"G:\SSVEP\data\benchmark")  # 含 S1.mat…S35.mat 和通道/频率文件的数据目录。
     experiment: str = "ssvepformer_loso_cuda"  # 新 GPU 实验目录；旧 CPU 结果保留在 ssvepformer_loso。
+    input_type: str = "complex"  # complex：特征轴实虚拼接；time：时域；complex_channels：通道轴实虚拼接。
     device: str = "cuda:0"  # cpu：CPU；cuda/cuda:0：第一张卡；cuda:1：第二张卡。无可用 GPU 时明确报错。
     N: int = 35  # 留出折数：依次测试 S1…SN；其余所有被试训练，不是只使用前 N 名被试。
-    M: int = 1  # 每折独立训练的种子数，使用 seed…seed+M-1，不从其他种子模型继续训练。
+    M: int = 3  # 每折独立训练的种子数，使用 seed…seed+M-1，不从其他种子模型继续训练。
     seed: int = 2026  # 起始随机种子；M=1 时所有折均使用此种子。
     evaluation_checkpoint: Path | None = None  # None：复核当前 N×M 计划；或填写某个 checkpoint.pt 的完整路径。
     evaluation_data_dir: Path | None = None  # None：使用模型保存的数据路径；可指定同一 Benchmark 数据的迁移目录。
@@ -22,7 +23,7 @@ class Config:
     blocks: int = 6  # 数据集固定属性：每被试的 block 数，每 block 各类别一个试次。
     channels: tuple = ("O1", "Oz", "O2", "PO3", "POz", "PO4", "Pz", "PO5", "PO6")  # 按名称及此顺序取通道。
     sample_rate: int = 250  # 已降采样的数据采样率（Hz）；修改数值不会执行重采样。
-    duration: float = 1.0  # 每试次分类窗口长度（秒），须对应整数采样点且不超过 FFT 长度。
+    duration: float = 1.0  # 每试次窗口长度（秒），须对应整数采样点；频域输入还须不超过 FFT 长度。
     start_seconds: float = 0.64  # 从试次起点裁窗：0.5 秒提示 + 0.14 秒视觉延迟。
     frequency_resolution: float = 0.2  # FFT 频率分辨率（Hz），由采样率/此值计算补零长度。
     frequency_range: tuple = (8.0, 64.0)  # 复频谱保留范围（Hz，含端点），也是带通滤波的通带。
@@ -30,7 +31,7 @@ class Config:
     filter_order: int = 4  # Butterworth 设计阶数，供 scipy.signal.butter 使用。
 
     init_std: float = 0.01  # 卷积/线性权重初始化的标准差；论文 variance 的歧义见 README。
-    spatial_multiplier: int = 2  # 通道组合输出倍数 = 输入通道数 × 此倍数。
+    spatial_multiplier: int = 2  # 通道组合输出 = 网络输入通道数 × 此值；通道拼接时默认输出 36 通道。
     encoder_blocks: int = 2  # 串联的残差子编码器数量。
     kernel_size: int = 31  # 编码器 Conv1d 沿频谱轴的卷积核长度，须为正奇数。
     head_multiplier: int = 6  # 分类头隐藏层宽度 = 类别数 × 此倍数。
@@ -49,8 +50,9 @@ class Config:
 
     @property
     def output_dir(self):
-        """实验总目录；单折配置中 experiment 自动附加 Sxx_seedxxxx。"""
-        return ROOT / "results" / self.experiment
+        """输入类型自动隔离；单折路径为 实验名/输入类型/Sxx_seedxxxx。"""
+        parts = Path(self.experiment).parts
+        return ROOT / "results" / parts[0] / self.input_type / Path(*parts[1:])
 
     @property
     def samples(self):
@@ -68,11 +70,29 @@ class Config:
         return round(self.sample_rate / self.frequency_resolution)
 
     @property
+    def spectral_bins(self):
+        """保留的频点数，与实虚部如何拼接无关。"""
+        return round((self.frequency_range[1] - self.frequency_range[0]) / self.frequency_resolution) + 1
+
+    @property
+    def input_channels(self):
+        """网络输入通道数；channels 始终只表示真实电极，不把实虚部当成新电极。"""
+        return len(self.channels) * (2 if self.input_type == "complex_channels" else 1)
+
+    @property
     def features(self):
-        """单通道实部和虚部拼接后的特征长度，自动推导。"""
-        return 2 * (round((self.frequency_range[1] - self.frequency_range[0]) / self.frequency_resolution) + 1)
+        """网络每通道的长度：时间采样点、双倍频点或单倍频点。"""
+        if self.input_type == "time":
+            return self.samples
+        return self.spectral_bins * (2 if self.input_type == "complex" else 1)
+
+    @property
+    def cache_features(self):
+        """缓存始终按真实电极存放；两种复频谱布局共用 [实部, 虚部] 缓存。"""
+        return self.samples if self.input_type == "time" else 2 * self.spectral_bins
 
     def validate(self):
+        assert self.input_type in ("complex", "time", "complex_channels"), "不支持的 input_type"
         assert self.device in ("cpu", "cuda") or (
             self.device.startswith("cuda:") and self.device[5:].isdigit()), "device 应为 cpu、cuda 或 cuda:编号"
         assert isinstance(self.N, int) and 1 <= self.N <= self.subjects, "N 必须在 1…subjects 之间"
@@ -81,7 +101,9 @@ class Config:
         assert self.subjects == 35, "当前加载器针对完整的 35 被试 Benchmark；折数请改 N"
         assert 1 <= self.test_subject <= self.subjects
         assert self.classes == 40 and self.blocks == 6 and self.sample_rate == 250
-        assert 0 < self.samples <= self.nfft and self.start + self.samples <= 1500
+        assert 0 < self.samples and self.start + self.samples <= 1500
+        if self.input_type != "time":
+            assert self.samples <= self.nfft, "频域窗口不能超过 FFT 长度"
         assert abs(self.samples - self.duration * self.sample_rate) < 1e-8
         assert abs(self.sample_rate / self.nfft - self.frequency_resolution) < 1e-8
         assert len(set(c.upper() for c in self.channels)) == len(self.channels)

@@ -39,7 +39,8 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
     details = output / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
     weights = model.fusion.weight.detach().flatten().tolist()
-    metric = {"model": "FB-SSVEPformer", "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
+    metric = {"model": "FB-SSVEPformer", "input_type": cfg.input_type,
+              "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
               "duration_s": cfg.duration, "ACC_percent": round(test["acc_percent"], 4),
               "ITR_bits_min": round(itr(test["acc_percent"], cfg), 4),
               "correct": test["correct"], "trials": test["total"]}
@@ -70,6 +71,7 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
 | 最终训练集 ACC（Dropout OFF） | {train['acc_percent']:.2f}% |
 
 S{cfg.test_subject} 留出测试，其余 {cfg.subjects - 1} 名被试训练；seed={cfg.seed}，窗口 {cfg.duration:g} 秒，设备 {cfg.device}。
+输入：{cfg.input_type}，每试次 {cfg.subbands}×{cfg.input_channels}×{cfg.features}；模型参数量：{sum(p.numel() for p in model.parameters())}。
 {cfg.subbands} 个独立子网各预训练 {cfg.epochs} 轮，再联合训练 {cfg.joint_epochs} 轮。
 训练及训练集监测共 {sum(r['seconds'] for r in history) / 60:.1f} 分钟；使用最后一轮联合模型。
 预训练阶段不评估测试被试；测试集不参与梯度计算、早停或选模。
@@ -98,6 +100,7 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     if saved.get("model_name") != "FB-SSVEPformer":
         raise ValueError("请提供 FB-SSVEPformer 的 checkpoint，不能使用基础模型 checkpoint")
     values = saved["config"].copy()
+    values.setdefault("input_type", "complex")
     trained_device = values.get("device", "cpu")
     values["device"] = device or trained_device
     for key in ("data_dir", "evaluation_checkpoint", "evaluation_data_dir"):
@@ -119,7 +122,7 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     model.load_state_dict(saved["model"])
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
-    same_context = data_dir is None and cfg.device == trained_device
+    same_context = data_dir is None and cfg.device == trained_device and "input_type" in saved["config"]
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, model, saved["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output)

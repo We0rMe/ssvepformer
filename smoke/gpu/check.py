@@ -13,14 +13,14 @@ from fb.config import CONFIG as FB_CONFIG
 from fb.model import FBSSVEPformer
 from fb.train import save_checkpoint as save_fb_checkpoint
 from model import SSVEPformer
-from runtime import configure_device, optimizer_to, restore_rng, timing_message
+from runtime import configure_device, optimizer_to, restore_rng
 from train import save_checkpoint, seed_everything, train_epoch
 
 
 def check_model(cfg, factory, fb, directory):
     device = seed_everything(cfg)
     model = factory(cfg).to(device)
-    shape = (4, cfg.subbands, len(cfg.channels), cfg.features) if fb else (4, len(cfg.channels), cfg.features)
+    shape = (4, cfg.subbands, cfg.input_channels, cfg.features) if fb else (4, cfg.input_channels, cfg.features)
     x = torch.randn(shape, generator=torch.Generator().manual_seed(37))
     y = torch.tensor([0, 1, 2, 3])
     optimizer = torch.optim.SGD(model.parameters(), lr=cfg.learning_rate,
@@ -88,8 +88,6 @@ def main():
             pass
         else:
             raise AssertionError("应拒绝不存在的 GPU 编号")
-    message = timing_message([{"epoch": i, "seconds": 2.0} for i in range(1, 6)], 100, 35)
-    assert "1.94" in message
     devices = ["cpu"]
     if torch.cuda.is_available():
         devices += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
@@ -104,8 +102,7 @@ def main():
             print("PASS:", checks[-1], flush=True)
     result = {"passed": checks, "guards": "Unavailable CUDA and invalid GPU index fail explicitly",
               "cuda_tested": len(devices) > 1,
-              "cuda_status": "tested on available GPUs" if len(devices) > 1 else "SKIPPED: this machine has no CUDA GPU",
-              "timing": "2 seconds/epoch × 100 epochs × 35 folds = 1.94 training hours (conditional arithmetic only)"}
+              "cuda_status": "tested on available GPUs" if len(devices) > 1 else "SKIPPED: this machine has no CUDA GPU"}
     write_json(output / "checks.json", result)
     print(result["cuda_status"], flush=True)
 

@@ -9,9 +9,10 @@ from config import Config
 @dataclass(frozen=True)
 class FBConfig(Config):
     experiment: str = "fb_ssvepformer_loso_cuda"  # 新 GPU 实验目录，名称须以 fb_ 开头。
-    device: str = "cuda:0"  # 可改为 cuda:1 使用第二张卡；本机无 GPU 检查时使用 cpu。
-    N: int = 1  # 默认先评估 S1；改为 35 即完整 LOSO，其余被试始终全部参与训练。
-    M: int = 1  # 每折种子数，依次使用 seed…seed+M-1。
+    input_type: str = "complex"  # FB 独立选择 complex / time / complex_channels，不跟随根配置切换。
+    device: str = "cuda:1"  # 第二张可见 GPU；cuda:0 为第一张；本机无 GPU 检查时使用 cpu。
+    N: int = 35  # 依次留出 S1…SN；35 为完整 LOSO，每折其余 34 名被试训练。
+    M: int = 3  # 每折种子数，依次使用 seed…seed+M-1。
     seed: int = 2026  # 起始随机种子；每折从头初始化全部子网与融合层。
     duration: float = 1.0  # 分类窗口长度（秒）；其余裁窗/FFT 设置沿用根配置。
     cpu_threads: int = 8  # 正式 FB 训练的 CPU 线程数，不修改其他进程的线程设置。

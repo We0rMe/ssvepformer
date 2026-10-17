@@ -19,7 +19,7 @@ from fb.config import CONFIG
 from fb.data import prepare_data, split_subjects
 from fb.evaluate import plot_training, save_results, summarize
 from fb.model import FBSSVEPformer
-from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng, timing_message
+from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng
 
 
 def training_plan(cfg):
@@ -120,10 +120,7 @@ def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id
                     f"{suffix} | {history[-1]['seconds']:.1f}s")
             if monitor:
                 plot_training(history, details.parent)
-            if epoch % 5 == 0:
-                estimate = timing_message([r for r in history if r["stage"] == stage], epochs, cfg.N * cfg.M)
-                if estimate:
-                    message(f"{stage} 阶段：{estimate}")
+
             if stop:
                 raise InterruptedError("STOP：已保存当前阶段，停止整个 FB 计划")
     return history
@@ -147,6 +144,12 @@ def run_single(cfg, features, audit, stop_path):
             x, y, test_x, test_y = split_subjects(features, cfg)
             device = seed_everything(cfg)
             model = FBSSVEPformer(cfg).to(device)
+            parameters = sum(p.numel() for p in model.parameters())
+            settings = json.loads((details / "settings.json").read_text(encoding="utf-8"))
+            settings["model"] = {"input_shape": [cfg.subbands, cfg.input_channels, cfg.features],
+                                 "parameters": parameters}
+            write_json(details / "settings.json", settings)
+            message(f"FB 输入 {cfg.input_type}: {cfg.subbands}×{cfg.input_channels}×{cfg.features} | 参数量 {parameters:,}")
             monitor_indices = torch.cat([torch.arange(i * cfg.classes * cfg.blocks,
                                                       i * cfg.classes * cfg.blocks + cfg.classes)
                                          for i in range(cfg.subjects - 1)])

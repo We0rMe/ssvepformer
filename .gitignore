@@ -2,6 +2,7 @@
 .conda-pkgs/
 cache/
 results/
+results_server/
 tmp/
 __pycache__/
 *.pyc

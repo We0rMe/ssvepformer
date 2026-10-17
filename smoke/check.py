@@ -19,7 +19,7 @@ from train import run, run_identity, run_single, save_checkpoint, seed_everythin
 
 
 def check_schedule(output):
-    cfg = replace(CONFIG, N=3, M=2, device="cpu")
+    cfg = replace(CONFIG, N=3, M=2, device="cpu", input_type="complex")
     scheduled = list(cfg.runs())
     assert [(c.test_subject, c.seed) for c in scheduled] == [
         (s, seed) for s in range(1, 4) for seed in (2026, 2027)]
@@ -99,7 +99,7 @@ def check_evaluation(output):
         directory = Path(temp) / "reproducibility"
         directory.mkdir()
         checkpoint = directory / "checkpoint.pt"
-        saved_cfg = replace(CONFIG, test_subject=7, seed=2027, device="cpu")
+        saved_cfg = replace(CONFIG, test_subject=7, seed=2027, device="cpu", input_type="complex")
         saved = {"config": saved_cfg.to_dict(), "epoch": saved_cfg.epochs,
                  "model": {}, "history": []}
         torch.save(saved, checkpoint)
@@ -122,6 +122,11 @@ def check_evaluation(output):
                 assert evaluate_checkpoint(checkpoint, device="cuda:0")
                 assert constructor.call_args.args[0].device == "cuda:0"
                 assert save.call_args.kwargs["output"] == directory / "reevaluation"
+            saved["config"].pop("input_type")
+            torch.save(saved, checkpoint)
+            assert evaluate_checkpoint(checkpoint)
+            assert constructor.call_args.args[0].input_type == "complex"
+            assert save.call_args.kwargs["output"] == directory / "reevaluation"
             saved["epoch"] = 1
             torch.save(saved, checkpoint)
             prepare.reset_mock()
@@ -132,7 +137,7 @@ def check_evaluation(output):
 def main():
     output = ROOT / "smoke" / "results"
     output.mkdir(exist_ok=True)
-    cfg = replace(CONFIG, device="cpu")
+    cfg = replace(CONFIG, device="cpu", input_type="complex")
     seed_everything(cfg)
     passed = []
     check_schedule(output)

@@ -1,21 +1,11 @@
-# SSVEPformer：Benchmark LOSO 评估
+# SSVEPformer / FB_SSVEPformer
 
-默认 **SSVEPformer、cuda:0、N=35 折、M=1 个种子、seed=2026、1 秒、100 epoch**。
-第 i 折仅用 Si 测试，其他全部 34 名被试训练；依次运行 S1…SN，每折依次使用 seed…seed+M-1。
-各折/种子均独立初始化模型和优化器，不运行 FB 模型。
-新 GPU 实验使用 `ssvepformer_loso_cuda`，从 S1 重新训练；原 CPU 实验 `ssvepformer_loso` 独立保留，不混合统计。
-2026-10-16 原 CPU 任务已完成 S1–S25，并在 S26 第 24 轮保存后停止；STOP 文件仍保留在原实验中。
+## 运行
 
-## Windows GPU 服务器
-
-建议在服务器上重新训练完整 35 折，保证同一实验的设备与数值设置一致。旧 CPU 成绩与 checkpoint 保留作对照。
-CPU→GPU 续练在技术上可迁移参数，但不同设备不保证相同随机轨迹；本实现不自动接受旧版/跨设备训练断点。
-同一设备、实现、配置及环境下的新版实验支持正常断点恢复。单独评估保存的模型可以选择不同设备。
-
-先在本机提交并推送代码，然后在服务器 Conda 终端中克隆项目、新建环境，无需复制 `.venv`：
+项目与环境准备：
 
 ```powershell
-git clone "你的私人仓库URL" SSVEPformer
+git clone https://github.com/We0rMe/ssvepformer
 cd SSVEPformer
 conda create -n ssvepformer-gpu python=3.11 pip -y
 conda activate ssvepformer-gpu
@@ -25,84 +15,75 @@ nvidia-smi
 python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available(), torch.cuda.device_count())"
 ```
 
-环境使用 64 位 Python 3.11、`torch==2.14.1+cu126`；本机 CPU 环境没有被重新安装。
-把 Benchmark 数据单独复制到服务器，再修改 `config.py` 的 `data_dir` 为实际位置。
-检查 `device="cuda:0"`、`experiment="ssvepformer_loso_cuda"`、`N=35`、`M=1`、`seed=2026`。
-GPU 不可用或编号错误会直接报错，不会悄悄退回 CPU。
+实验环境使用 64 位 Python 3.11、`torch==2.14.1+cu126`。
+把 Benchmark 数据路径填写到 `config.py` 的 `data_dir` 处，并检查 `device="cuda:0"`、`experiment="ssvepformer_loso_cuda"`、`N=35`、`M=3`、`seed=2026`。
+注意：
+- GPU 不可用或编号错误会直接报错，不会悄悄退回 CPU。
+- 切换 input_type 会自动使用独立目录；改变其他训练设置或重复整组实验时再更换 experiment，已有不匹配配置会报错。
 
-在服务器先运行设备检查，然后启动训练：
+
+设备检查，而后启动训练SSVEPformer：
 
 ```powershell
 python -u -m smoke.gpu.check
 python -u train.py
-# 训练结束已自动测试；需要重新复核模型时：
+# 训练结束会自动测试；需要重新复核模型时可执行：
 python -u evaluate.py
 ```
 
+若训练中断则可重新运行，会自动断点继训。
+
 设备检查使用合成数据，对 CPU 及所有可见 GPU 分别测试两个模型的前向/反向、评估和断点恢复；无正式训练。
-结果位于 `smoke/gpu/results/checks.json`。本机没有 GPU 时明确记录 CUDA 检查为 SKIPPED，不能把它当成服务器实测通过。
+结果位于 `smoke/gpu/results/checks.json`。若环境无 GPU 时明确记录 CUDA 检查为 SKIPPED。
 
 `device="cuda:1"` 使用第二张显卡；`device="cpu"` 使用 CPU。单个进程仅使用所选的一张卡，不会自动双卡分摊 35 折。
 如需同时训练两个模型，可在启动前把基础模型设置为 cuda:0，把 `fb/config.py` 中的 FB 设置为 cuda:1，再分别运行两个入口。
+
+设置fb/config.py内的额外参数后（剩余参与继承于SSVEPformer.config），启动训练FB-SSVEPformer：
+
+```powershell
+python -u -m fb.train
+python -u -m fb.evaluate
+```
+
 两模型使用独立结果目录；不要同时对同一个实验目录训练和评估。
 
-保持 FP32、原 batch=128 和优化器参数，启用确定性算法，关闭 AMP/TF32 和 cuDNN 自动测速。
-CPU 完成滤波/FFT，GPU 完成模型计算。模型、当前批次及优化器动量在所选设备上；完整特征缓存留在 CPU。
-checkpoint 保存 CPU 随机状态及当前 CUDA 设备的随机状态；配置、GPU 名称、CUDA/cuDNN 和精度设置记入复现资料。
-即便同一种子，也不承诺 CPU 与 GPU、不同硬件/软件环境间逐位一致，见 [PyTorch 可复现性说明](https://docs.pytorch.org/docs/2.14/notes/randomness.html)。
+## 输入特征对比
 
-## 训练需要多久
+SSVEPformer 修改 `config.py`，FB 修改 `fb/config.py` 中的 `input_type`。两者各自选择，互不跟随。
+保持 N=35、M=3、seed=2026、duration=1.0、batch_size=128 及其他训练设置一致。输入变化时重新初始化训练，不载入另一种输入的权重。
 
-服务器尚未实测，不能只凭 RTX 4090D 型号确定耗时。SSVEPformer 的 35 折单种子共 3500 个 epoch，每 epoch 为 64 个训练 batch。
-日志每 5 轮用近期实际耗时外推训练总时长（含训练监测，排除首轮预热），不会读取测试准确率来选择配置。
+| input_type | 含义 | 单个子网输入 | SSVEPformer 参数量 | 三子带 FB 参数量 |
+|---|---|---|---:|---:|
+| `complex` | 每个电极内按 `[Re, Im]` 沿特征轴拼接，原实验 | 9×562 | 3,099,184 | 9,297,555 |
+| `time` | 滤波后裁取时域，不补零、不 FFT | 9×250 | 1,239,664 | 3,718,995 |
+| `complex_channels` | `[Re(CH1..CH9), Im(CH1..CH9)]` 沿通道轴拼接 | 18×281 | 2,681,726 | 8,045,181 |
 
-| 服务器实测平均每轮耗时 | 3500 轮训练部分 |
-|---|---:|
-| 2 秒 | 约 1.94 小时 |
-| 5 秒 | 约 4.86 小时 |
-| 10 秒 | 约 9.72 小时 |
+例如先设 `input_type: str = "time"`，运行 `python -u train.py` 或 `python -u -m fb.train`；完成后改为 `"complex_channels"` 再运行相同命令即可。
+两种新增实验都用原来的 35 折、2026–2028 三个种子。现有 `results_server/` 中已完成的 complex 结果直接作基线，本次不会重新训练或移动它们。
+当前配置保留 complex 默认值；启动新增实验前请显式选择 time 或 complex_channels。
 
-这些是条件计算，不是显卡速度预测；另加预处理、保存/绘图、最终评估开销。
-直接开始正式训练即可测得速度，前几轮会继续用于这次实验，不需要为测速重新开始。
-FB 的各子网预训练和联合训练分别估时，不能把某一阶段的速度直接当成 FB 全部阶段速度。
+原实现是在 `data.py` 的预处理阶段完成实虚拼接并缓存。现在仍把频域的基准缓存存成每电极 `[Re, Im]`，每折划分后由 `network_input` 一次性转换成网络所需布局；训练与评估共用转换，不在每个 batch 重复 FFT。
+complex 和 complex_channels 共用同一份频域缓存。time 使用独立的滤波后时域缓存，保持原微伏数值，不新增全局归一化或拟合统计量。
+FB 使用自己的子带滤波缓存；每个子带内采用相同转换，不混合子带轴。第一次运行新版会因处理代码摘要变化建立新缓存，以后各折/种子复用。
 
-## 使用
+采用先全部实部、后全部虚部的通道顺序，便于检查与逆变换。交错顺序只是固定通道置换：首层为覆盖全部输入通道的 1×1 卷积，适当置换权重后两种顺序的表达能力相同，但相同种子下不保证数值训练轨迹一致。
+沿通道拼接完整保留原来的复频谱数值，没有新增/丢弃相位信息；改变的是网络怎样混合实虚部。
+`channels` 始终是 9 个实际电极，`input_channels` 和 `features` 自动推导。通道组合保持 2×输入通道数规则，因此三种输入的输出通道为 18、18、36；LayerNorm、MLP 与分类头尺寸随之适配。
+这不是参数量严格匹配的对照：表示方式改变也改变了模型参数量和卷积轴的含义，应结合上述形状与参数量解读，不能只把差异归因为信息量。暂不实现幅度谱或 b/a。
 
-服务器激活上述环境后直接使用 `python`；本地现有 CPU 环境则先设 `device="cpu"` 和一个新的实验名，再使用 `.venv\python.exe`。日志显示在当前终端：
+正式论文表 7（Dataset 2，1 秒）的时域 ACC 为 71.21 ± 23.38% / 74.55 ± 23.52%，复频谱为 80.40 ± 20.45% / 83.19 ± 18.87%（依次为 SSVEPformer / FB）。表 7 没有给出 ITR。
+论文的 ± 表示被试间差异，应与本项目逐种子的 35 被试统计对照；三种子均值的 ± 是种子间变化，两者不可混用。
 
-```powershell
-Set-Location G:\SSVEP\SSVEPformer
-.\.venv\python.exe -u train.py
-```
+新版输出路径为 `results/<experiment>/<input_type>/Sxx_seedxxxx/`，总报告在 `<input_type>/report.md`。模型配置、参数量和输入形状记录在各折 `reproducibility/settings.json`；训练日志及单折报告也显示形状和参数量。
+评估输入类型从 checkpoint 读取，不会随当前 input_type 覆盖保存模型的结构。旧 checkpoint 缺少该字段时按 complex 解读，复核结果另存 reevaluation；迁移后的服务器模型请显式配置 evaluation_checkpoint 与本地 evaluation_data_dir。
+本次实现变更后不接续旧版训练 checkpoint；旧结果与代码快照保留用于复现，新的对比从头训练。
 
-修改参数只需编辑 `config.py`，每个字段都有用途注释。`N` 范围为 1…35；`M` 为正整数。
-`N=5` 表示只做 S1…S5 的五折，每折依然用其他 34 名被试训练。
-`M=3, seed=2026` 表示每折分别使用 2026、2027、2028 三个种子。
-`test_subject` 是调度器自动填写的单折上下文，不用手动修改；`subjects/classes/blocks/sample_rate` 是数据属性，不能当作任意超参数修改。
+输入专项检查：`python -u -m smoke.inputs.check`。CPU 上检查三种输入、缓存复用、被试隔离、模型梯度及小型完整训练/评估；输出统一在 `smoke/inputs/results/`。
 
-实验名 `experiment` 决定结果总目录；改变数据处理、模型或训练设置时使用新实验名，避免混合结果。
-只增减 N/M 不影响已有单折，增加后补跑缺少的实验；减少后汇总只包括当前计划。
-日志就在运行命令的当前终端中输出，不启动其他窗口或后台程序。不要同时启动训练与批量评估。
-本机 CPU 环境已建立在 `.venv/`，无需激活即可使用，不要用当前面向 GPU 的 requirements 覆盖它。
+## 项目结构
 
-`train.py` 在每次训练结束后自动测试并更新汇总，因此不必额外运行评估才能得到结果。
-完成后如需重新从保存的模型复核，可运行：
-
-```powershell
-.\.venv\python.exe -u evaluate.py
-```
-
-评估不训练模型，模型/预处理参数读取 checkpoint，执行设备使用当前配置的 device：
-
-- `evaluation_checkpoint = None`：按当前 experiment、N、M、seed 定位所有计划中的模型；跳过不存在或未训练完的模型。
-- 只评估某个模型：例如 `evaluation_checkpoint = ROOT / "results/ssvepformer_loso_cuda/S01_seed2026/reproducibility/checkpoint.pt"`。
-- `evaluation_data_dir = None`：使用该模型保存的 `data_dir`；如果同一份 Benchmark 数据迁移，可填写 `Path(r"D:\data\benchmark")`。目录需包含全部 35 个 MAT 文件和辅助文件。它不支持任意格式的新数据集。
-- 留出被试编号来自 checkpoint，不由当前 `test_subject` 指定。更换数据目录或评估设备时，复核报告另存到 checkpoint 所在目录的 `reevaluation/`，不覆盖原实验成绩，也不纳入原实验汇总。
-
-默认复核更新该折的报告与图像；批量模式同时更新总汇总，指定单模型时不更新总汇总。
-快速检查：`.\.venv\python.exe smoke\check.py`，输出只放在 `smoke/results/`。
-
-主目录保留五个功能入口/模块，增加一个两个模型共用的设备辅助模块：
+主目录五个功能入口/模块，一个共用的设备辅助模块(runtime.py)：
 
 | 文件 | 职责 |
 |---|---|
@@ -111,13 +92,15 @@ Set-Location G:\SSVEP\SSVEPformer
 | `model.py` | SSVEPformer |
 | `train.py` | 训练、训练集监测、断点与日志 |
 | `evaluate.py` | 模型评估、ACC/ITR、CSV、报告和图片 |
-| `runtime.py` | CPU/CUDA 设置、随机状态恢复、运行设备记录、耗时提示 |
+| `runtime.py` | 两模型及评估共用的 CPU/CUDA 设置、随机状态恢复、优化器动量迁移与设备记录 |
 
-## 输出
+runtime 保留为一个共用辅助模块，避免训练与评估的设备逻辑重复或相互导入。已删除耗时外推函数及两处调用，仅保留每 epoch 实测耗时。
+
+## 输出结构
 
 ```text
 results/
-  ssvepformer_loso_cuda/
+  ssvepformer_loso_cuda/<input_type>/
     report.md                  # 完成进度、各个种子下的被试均值 ± 标准差
     summary.csv                # 每折每种子一行关键测试指标
     reproducibility/plan.json  # 当前调度计划
@@ -150,7 +133,7 @@ smoke/
 如需在 epoch 结束处保存并停止整个计划，可在另一个 PowerShell 终端执行：
 
 ```powershell
-New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso_cuda\reproducibility\STOP -ItemType File
+New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso_cuda\time\reproducibility\STOP -ItemType File
 ```
 
 也支持在当前单折的 reproducibility 内创建 STOP；停止后不会继续下一折或下一个种子。
@@ -159,21 +142,9 @@ New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso_cuda\reproducibility\STOP
 总报告在每次完成后更新，未全部完成时标为“部分结果”。每个种子单独计算被试间均值 ± 样本标准差（ddof=1）。
 若 M>1，全部完成后还计算“每种子的被试均值”在种子间的均值 ± 标准差，不混淆两种变异来源。只有一个样本时不制造标准差。
 
-## 这次审查与修正
+STOP 示例针对 time；其他输入换成对应的输入目录名。
 
-旧结果已从 checkpoint 重算：S1 正确 135/240，ACC 56.25%；关闭 Dropout 的完整训练集 ACC 为 51.94%，最后一轮开启 Dropout 的训练 ACC 为 19.14%。
-因此旧测试值计算正确，但旧日志没有清楚区分模型模式，且训练收敛不足。
-
-新版采用 `init_std=0.01`（卷积/线性层 bias=0），与用户提供的第三方实现一致。
-正式论文写的是“variance 0.01”，字面对应 `std=0.1`，这是原文与参考实现的差异，不能声称两者相同。
-仅用 S2–S17 的 640 个训练试次、相同种子和顺序诊断 15 epoch，`std=0.1` / `0.01` 的训练集评估 ACC 分别为 3.44% / 10.31%；该小规模诊断支持使用较小初始化继续复现，但不等于证明最终精度。
-
-预处理统一采用 8–64 Hz 四阶 Butterworth 零相位带通，与参考项目的数据流程一致，再裁窗、FFT。
-论文明确为时域基线规定此滤波，对频域输入的措辞存在歧义；旧实现未额外带通，新实现将此选择明确写入配置。
-滤波逐试次独立执行于完整 6 秒试次，然后提取 `[0.64,1.64)` 秒。它使用窗口外的同试次时间上下文，属于离线协议，不能宣称在线因果性能。
-采集时已经做过 50 Hz 陷波，不重复施加。
-
-## 数据与模型口径
+## 原 complex 输入的数据与模型口径
 
 - 通过通道名定位九个通道，零基索引为 `[60,61,62,54,55,56,47,53,57]`。
 - 每名被试 240 个试次；保留 MAT 的类别顺序，不按频率排序标签，不重叠切窗。
@@ -195,4 +166,4 @@ ITR 采用 40 类、`T=数据长度+0.5秒`，低于随机水平时记 0。
 各单次实验报告 ACC 与 ITR；均值与标准差在总报告中计算。
 已有 S1/2026：223/240，ACC 92.92%，ITR 183.14 bits/min。论文的 80.40% ACC 和 149.95 bits/min 是 35 名被试的平均结果；单折不能等同于完整复现。
 
-参考：[正式论文](https://doi.org/10.1016/j.neunet.2023.04.045)、[第三方实现](https://github.com/okbalefthanded/ssvepformer)。
+参考：[正式论文](https://doi.org/10.1016/j.neunet.2023.04.045)

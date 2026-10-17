@@ -29,10 +29,10 @@ class Encoder(nn.Module):
 class SSVEPformer(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        channels = len(cfg.channels) * cfg.spatial_multiplier
+        channels = cfg.input_channels * cfg.spatial_multiplier
         features, hidden = cfg.features, cfg.head_multiplier * cfg.classes
         self.channel_combination = nn.Sequential(
-            nn.Conv1d(len(cfg.channels), channels, 1),
+            nn.Conv1d(cfg.input_channels, channels, 1),
             nn.LayerNorm(features),
             nn.GELU(), 
             nn.Dropout(cfg.dropout),

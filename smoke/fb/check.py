@@ -202,7 +202,7 @@ def check_scheduler(cfg, output):
 def main():
     output = ROOT / "smoke" / "fb" / "results"
     output.mkdir(parents=True, exist_ok=True)
-    cfg = replace(CONFIG, cpu_threads=1, device="cpu")
+    cfg = replace(CONFIG, cpu_threads=1, device="cpu", input_type="complex")
     seed_everything(cfg)
     before = protected_hashes()
     designs, real = check_filters(cfg)

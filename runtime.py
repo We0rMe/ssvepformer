@@ -1,4 +1,4 @@
-"""两个模型共用的 CPU/CUDA 设置、随机状态和耗时提示。"""
+"""两个模型共用的 CPU/CUDA 设置与断点状态恢复。"""
 
 import os
 
@@ -61,16 +61,3 @@ def optimizer_to(optimizer, device):
         for key, value in state.items():
             if isinstance(value, torch.Tensor):
                 state[key] = value.to(device)
-
-
-def timing_message(history, epochs, runs):
-    """只用实际测量外推；跳过首轮预热，不把预训练速度误用到 FB 联合训练。"""
-    rows = history[-10:]
-    if len(rows) < 5:
-        return None
-    if rows[0]["epoch"] == 1:
-        rows = rows[1:]
-    seconds = sum(row["seconds"] for row in rows) / len(rows)
-    return (f"耗时参考：近期均值 {seconds:.2f}s/epoch（含监测）；"
-            f"同速重跑 {runs} 次 × {epochs} 轮约 {seconds * epochs * runs / 3600:.2f} 小时。"
-            "这是训练部分的外推，不含预处理、保存/绘图及最终测试。")

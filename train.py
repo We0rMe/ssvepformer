@@ -18,7 +18,7 @@ from config import CONFIG, ROOT
 from data import prepare_data, split_subjects
 from evaluate import evaluate, plot_training, save_results, summarize, write_csv, write_json
 from model import SSVEPformer
-from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng, timing_message
+from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng
 
 
 def seed_everything(cfg):
@@ -124,6 +124,10 @@ def run_single(cfg, features, audit, stop_path):
             x, y, test_x, test_y = split_subjects(features, cfg)
             device = seed_everything(cfg)
             model = SSVEPformer(cfg).to(device)
+            parameters = sum(p.numel() for p in model.parameters())
+            settings = json.loads((details / "settings.json").read_text(encoding="utf-8"))
+            settings["model"] = {"input_shape": [cfg.input_channels, cfg.features], "parameters": parameters}
+            write_json(details / "settings.json", settings)
             optimizer = torch.optim.SGD(model.parameters(), lr=cfg.learning_rate,
                                         momentum=cfg.momentum, weight_decay=cfg.weight_decay)
             # 所有训练被试各取第一个 block，仅观察训练拟合，绝不包含测试被试。
@@ -143,6 +147,7 @@ def run_single(cfg, features, audit, stop_path):
                 history, start = state["history"], state["epoch"]
             message(f"SSVEPformer | {device} | seed={cfg.seed} | test=S{cfg.test_subject} | "
                     f"train={len(y)}, test={len(test_y)} | init_std={cfg.init_std} | epoch {start}/{cfg.epochs}")
+            message(f"输入 {cfg.input_type}: {cfg.input_channels}×{cfg.features} | 参数量 {parameters:,}")
             for epoch in range(start + 1, cfg.epochs + 1):
                 if stop_path.exists() or (details / "STOP").exists():
                     if history:
@@ -170,17 +175,14 @@ def run_single(cfg, features, audit, stop_path):
                                          "monitor_acc_dropout_off": row["monitor_acc"]})
                 if monitor:
                     plot_training(history, output)
-                if epoch % 5 == 0:
-                    estimate = timing_message(history, cfg.epochs, cfg.N * cfg.M)
-                    if estimate:
-                        message(estimate)
+
                 if stop:
                     raise InterruptedError("STOP 文件请求停止")
             # 当前留出被试首次进入模型发生在固定训练轮数结束后。
             train_metrics, _ = evaluate(model, x, y, cfg)
             test_metrics, predictions = evaluate(model, test_x, test_y, cfg)
             metric = save_results(cfg, history, test_metrics, train_metrics, predictions,
-                                  test_y.numpy(), audit["target_frequencies"])
+                                  test_y.numpy(), audit["target_frequencies"], parameters=parameters)
             write_json(status_path, {"state": "complete", "epoch": cfg.epochs, "epochs": cfg.epochs})
             message(f"TEST S{cfg.test_subject}: ACC={metric['ACC_percent']:.2f}% | "
                     f"ITR={metric['ITR_bits_min']:.2f} bits/min | {metric['correct']}/{metric['trials']}")

@@ -65,11 +65,13 @@ FFT 用实际窗口采样点数归一化；补零加密频率采样网格，并�
 ## 如何修改参数、启动与复核
 
 修改 `fb/config.py`，不必改动根配置。`FBConfig` 继承根 `Config` 默认值，因此通用参数的含义一致。
+`input_type` 在 FB 中独立设置：complex（原始 9×562）、time（每子带 9×250 时域）、complex_channels（每子带 18×281）。其余比较口径、参数量和论文表 7 参考值见根 README 的“输入特征对比”。
+time 仍使用 FB 的 9–80、18–80、27–80 Hz 滤波，不叠加基础模型的 8–64 Hz 滤波。两种复频谱输入共用缓存，通道拼接在每折训练/评估前完成。
 需要调整学习率、线程数或评估路径时，可直接在 `FBConfig` 中同名覆盖，例如 `cpu_threads: int = 4`。
 继承的 `filter_order` 不用于 FB；`bandpass` 固定为 False，表示不额外串联基础 Butterworth。
 `frequency_range` 在 FB 中仅控制 FFT 特征范围；`band_step/band_high` 控制子带通带。
 
-默认 cuda:0、N=1、M=1、seed=2026，先评估一个留出被试。N=35 才运行完整 LOSO。
+当前配置为 cuda:1、N=35、M=3、seed=2026，运行完整 LOSO，每折种子为 2026、2027、2028。
 `device="cuda:1"` 可使用第二张卡；无 GPU 的本地检查设置 cpu，不能依赖自动回退。
 每折仍然使用其余全部 34 名被试训练；同一折的不同种子从头初始化，不共享训练所得权重。
 每次默认实际执行 3×100+20=320 个阶段内 epoch，其中联合 epoch 同时训练三个子网，耗时高于基础模型。
@@ -84,6 +86,17 @@ python -u -m fb.train
 ```
 
 日志直接显示在当前终端。不能用 `python fb/train.py` 代替 `-m fb.train`，否则同名模块的导入路径可能混淆。
+运行前可确认实际生效的继承参数：
+
+```powershell
+python -c "from fb.config import CONFIG as c; c.validate(); print(c.to_dict())"
+```
+
+两张卡均可见时，建议基础模型使用 cuda:0、FB 使用 cuda:1，在两个终端分别运行，共用现有环境即可。
+若设置过 CUDA_VISIBLE_DEVICES，cuda 编号对应筛选后的可见设备顺序，先检查 torch.cuda.device_count()。
+同卡启动两个独立训练进程也是可行的，但显存空闲不代表计算资源空闲；可能发生资源竞争，使两个任务变慢。
+两模型仍会共享 CPU、系统内存和磁盘；需要减少 CPU 竞争时，仅在 FBConfig 中覆盖 cpu_threads。
+不要为了占满显存而修改 batch_size，以免改变当前复现实验设置。
 训练完成自动测试，无需再运行评估才能得到结果。另行复核保存模型：
 
 ```powershell
@@ -101,7 +114,7 @@ python -u -m fb.evaluate
 “每折独立配置”是为每次实验填写测试被试、种子、结果路径，并非复制或重新处理整套原始数据。
 
 ```text
-results/fb_ssvepformer_loso_cuda/
+results/fb_ssvepformer_loso_cuda/<input_type>/
   report.md, summary.csv                 # 总进度和均值 ± 标准差
   reproducibility/plan.json
   S01_seed2026/
@@ -114,7 +127,7 @@ results/fb_ssvepformer_loso_cuda/
 中断后重新运行原命令会恢复当前阶段，不重复已完成的子网；完成项会跳过。
 只增减 N/M 可补跑/缩小计划；更换子带数、滤波或训练设置时请换新的 `experiment`。
 
-创建 `results/fb_ssvepformer_loso_cuda/reproducibility/STOP` 可在 epoch 边界保存并停止整个 FB 计划。
+创建 `results/fb_ssvepformer_loso_cuda/<input_type>/reproducibility/STOP` 可在 epoch 边界保存并停止当前输入的 FB 计划。
 也可在当前单折的 reproducibility 中创建 STOP；恢复前删除它。Ctrl+C 恢复至最近一次定期保存的 checkpoint。
 FB 的 STOP、锁、日志与基础模型完全分开。
 

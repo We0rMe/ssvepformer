@@ -84,11 +84,12 @@ def plot_training(history, directory):
     plt.close(fig)
 
 
-def save_results(cfg, history, test, train, predictions, labels, frequencies, output=None):
+def save_results(cfg, history, test, train, predictions, labels, frequencies, output=None, parameters=None):
     output = output or cfg.output_dir
     details = output / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
-    metric = {"model": "SSVEPformer", "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
+    metric = {"model": "SSVEPformer", "input_type": cfg.input_type,
+              "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
               "duration_s": cfg.duration, "ACC_percent": round(test["acc_percent"], 4),
               "ITR_bits_min": round(itr(test["acc_percent"], cfg), 4),
               "correct": test["correct"], "trials": test["total"]}
@@ -109,6 +110,11 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
     fig.savefig(output / "confusion.png", dpi=150)
     plt.close(fig)
     minutes = sum(row["seconds"] for row in history) / 60
+    reference = {
+        "complex": "论文的 80.40% ACC、149.95 bits/min 是 35 名被试平均结果。",
+        "time": "论文表 7 的时域输入 ACC 为 71.21 ± 23.38%（35 名被试；表 7 未报告 ITR）。",
+        "complex_channels": "沿通道拼接是新增对比，论文表 7 没有该布局的对应结果。",
+    }[cfg.input_type]
     text = f"""# SSVEPformer · S{cfg.test_subject} 测试结果
 
 | 指标 | 结果 |
@@ -120,12 +126,13 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
 | 最后一轮训练 ACC（开启 Dropout） | {history[-1]['train_acc']:.2f}% |
 
 设置：S{cfg.test_subject} 测试，其余 {cfg.subjects - 1} 名被试训练；种子 {cfg.seed}；{cfg.duration:g} 秒；{cfg.epochs} epoch；设备 {cfg.device}。
+输入：{cfg.input_type}，每试次 {cfg.input_channels}×{cfg.features}；模型参数量：{parameters if parameters is not None else '未记录'}。
 训练与训练集监测耗时约 {minutes:.1f} 分钟。固定最后一轮模型，测试集未参与早停或选模。
 
 `training.png` 中蓝线是各训练批次开启 Dropout 的指标；橙线是固定训练子集关闭 Dropout 的监测指标，**不是验证集**。
 测试集只在训练结束后评估。单次、单被试实验不报告“均值 ± 标准差”。
 
-论文的 80.40% ACC、149.95 bits/min 是 **35 名被试平均结果**，与当前 S{cfg.test_subject} 单被试结果不构成同口径复现结论。
+{reference} 当前 S{cfg.test_subject} 单被试结果不构成全被试复现结论。
 详细配置、训练逐轮 CSV、预测明细、模型和代码快照均在 `reproducibility/`。
 """
     
@@ -146,9 +153,13 @@ def summarize(cfg, *, evaluation=False):
         assert row["test_subject"] == f"S{single.test_subject}" and int(row["seed"]) == single.seed
         assert int(row["trials"]) == cfg.classes * cfg.blocks
         assert abs(float(row["duration_s"]) - cfg.duration) < 1e-8
+        if row.get("input_type", "complex") != cfg.input_type:
+            raise ValueError("不同输入类型不能混入同一汇总")
+        row.setdefault("input_type", "complex")
         settings = single.output_dir / "reproducibility" / "settings.json"
         if settings.exists():
             saved = json.loads(settings.read_text(encoding="utf-8"))["config"]
+            saved.setdefault("input_type", "complex")
             current = json.loads(json.dumps(single.to_dict()))
             ignored = {"N", "M", "experiment", "evaluation_checkpoint", "evaluation_data_dir"}
             if evaluation:
@@ -157,10 +168,11 @@ def summarize(cfg, *, evaluation=False):
                 raise ValueError(f"{single.output_dir.name} 的设置不匹配，请使用新的 experiment")
         rows.append(row)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    fields = ["model", "test_subject", "seed", "duration_s", "ACC_percent", "ITR_bits_min", "correct", "trials"]
+    fields = ["model", "input_type", "test_subject", "seed", "duration_s", "ACC_percent", "ITR_bits_min", "correct", "trials"]
     write_csv(cfg.output_dir / "summary.csv", rows, fields=fields)
     complete = len(rows) == cfg.N * cfg.M
     lines = ["# SSVEPformer · LOSO 汇总", "",
+             f"输入：{cfg.input_type}；每子网输入形状 {cfg.input_channels}×{cfg.features}。", "",
              f"完成 {len(rows)} / {cfg.N * cfg.M} 次实验；计划 S1–S{cfg.N}，每折 {cfg.M} 个种子。",
              "完整计划已完成。" if complete else "**部分结果：尚不能作为完整计划的最终结果。**", "",
              "下表每行在同一种子下，对已完成被试分别计算 ACC、ITR 的均值 ± 样本标准差（ddof=1）。",
@@ -198,6 +210,7 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     checkpoint = Path(checkpoint).resolve()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     values = state["config"].copy()
+    values.setdefault("input_type", "complex")  # 旧模型始终使用原始复频谱，不能被当前输入选择覆盖。
     trained_device = values.get("device", "cpu")
     values["device"] = device or trained_device
     for key in ("data_dir", "evaluation_checkpoint", "evaluation_data_dir"):
@@ -218,10 +231,11 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
     # 更换数据目录或推理设备的复核另存，避免替换原实验的正式指标。
-    same_context = data_dir is None and cfg.device == trained_device
+    same_context = data_dir is None and cfg.device == trained_device and "input_type" in state["config"]
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, state["history"], test, train, predictions,
-                          test_y.numpy(), audit["target_frequencies"], output=output)
+                          test_y.numpy(), audit["target_frequencies"], output=output,
+                          parameters=sum(p.numel() for p in model.parameters()))
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir),
                 "test_subject": cfg.test_subject, "epoch": state["epoch"], "cache_id": audit["cache_id"],

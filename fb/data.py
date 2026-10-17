@@ -11,7 +11,7 @@ from scipy import signal
 from scipy.io import loadmat
 
 from config import ROOT
-from data import channel_indices, complex_spectrum, read_subject, split_subjects
+from data import channel_indices, read_subject, split_subjects, window_features
 from evaluate import write_json
 
 
@@ -39,8 +39,8 @@ def preprocess(trials, cfg, designs=None):
         filtered = signal.sosfiltfilt(np.asarray(design["sos"]), trials, axis=-1)
         # 2. 在滤波之后裁窗，默认 [0.64, 1.64) 秒；属于使用整试次上下文的离线处理。
         windows = filtered[..., cfg.start:cfg.start + cfg.samples]
-        # 3. 共用 FFT：n=1250 自动补零；保留 8–64 Hz，再按 [实部, 虚部] 拼接为 562 维。
-        features.append(complex_spectrum(windows, cfg))
+        # 3. 时域直接保留采样点；频域共用 FFT。通道轴拼接留给每折输入转换。
+        features.append(window_features(windows, cfg))
     return np.stack(features, axis=1)
 
 
@@ -51,7 +51,8 @@ def prepare_data(cfg):
             "lower_transition", "upper_stop", "passband_ripple", "stopband_attenuation")
     files = [cfg.data_dir / f"S{s}.mat" for s in range(1, cfg.subjects + 1)]
     files += [cfg.data_dir / "64-channels.loc", cfg.data_dir / "Freq_Phase.mat"]
-    spec = {"settings": {key: getattr(cfg, key) for key in keys},
+    spec = {"representation": "time" if cfg.input_type == "time" else "complex",
+            "settings": {key: getattr(cfg, key) for key in keys},
             "sources": [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in files],
             "code": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                      for name in ("data.py", "fb/data.py")}}
@@ -59,8 +60,8 @@ def prepare_data(cfg):
     directory = ROOT / "cache" / cache_id
     directory.mkdir(parents=True, exist_ok=True)
     feature_file, audit_file = directory / "features.npy", directory / "audit.json"
-    shape = (cfg.subjects, cfg.classes * cfg.blocks, cfg.subbands, len(cfg.channels), cfg.features)
-    with FileLock(str(directory / "cache.lock"), timeout=0):
+    shape = (cfg.subjects, cfg.classes * cfg.blocks, cfg.subbands, len(cfg.channels), cfg.cache_features)
+    with FileLock(str(directory / "cache.lock"), timeout=600):
         if feature_file.exists() and audit_file.exists():
             features = np.load(feature_file, mmap_mode="r")
             if features.shape != shape or features.dtype != np.float32:
@@ -84,7 +85,7 @@ def prepare_data(cfg):
         frequency = loadmat(cfg.data_dir / "Freq_Phase.mat")
         audit = {"cache_id": cache_id, "shape": shape, "subjects": subjects,
                  "zero_based_channels": channel_indices(cfg), "window": [cfg.start, cfg.start + cfg.samples],
-                 "nfft": cfg.nfft, "filter_bank": designs, "spec": spec,
+                 "nfft": None if cfg.input_type == "time" else cfg.nfft, "filter_bank": designs, "spec": spec,
                  "protocol": "Independent whole-trial zero-phase filters; no dataset-fitted normalization",
                  "target_frequencies": frequency["freqs"].ravel().tolist(),
                  "target_phases": frequency["phases"].ravel().tolist()}
