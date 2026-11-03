@@ -1,25 +1,31 @@
-"""只修改本文件即可设置 FB 实验；共用参数继承根目录 Config 的默认值。"""
-
+"""FB 实验配置：顶部修改常用选项，下方固定滤波器组参数。"""
 from dataclasses import dataclass
 from pathlib import Path
-
-from config import Config
+from config import Config, CONFIG as BASE
 
 
 @dataclass(frozen=True)
 class FBConfig(Config):
-    experiment: str = "fb_ssvepformer_loso_cuda"  # 新 GPU 实验目录，名称须以 fb_ 开头。
-    input_type: str = "complex"  # FB 独立选择 complex / time / complex_channels，不跟随根配置切换。
-    device: str = "cuda:1"  # 第二张可见 GPU；cuda:0 为第一张；本机无 GPU 检查时使用 cpu。
-    N: int = 35  # 依次留出 S1…SN；35 为完整 LOSO，每折其余 34 名被试训练。
-    M: int = 3  # 每折种子数，依次使用 seed…seed+M-1。
-    seed: int = 2026  # 起始随机种子；每折从头初始化全部子网与融合层。
-    duration: float = 1.0  # 分类窗口长度（秒）；其余裁窗/FFT 设置沿用根配置。
+    # 常用实验选项：日常只需修改这一段。
+    data_dir: Path = BASE.data_dir
+    experiment: str = "fb_ssvepformer_experiments"
+    input_type: str = "complex"  # complex / amplitude / time / complex_channels
+    duration: float = 1.0  # 秒，例如 0.5、1.0、2.0。
+    device: str = "cuda:0"  # 单卡服务器用 cuda:0；确有第二张可见卡时可改 cuda:1。
+    N: int = 35
+    M: int = 3
+    seed: int = 2026
+    early_stopping: bool = False  # 所有子网和联合阶段共用独立验证被试；各阶段独立早停。
+    epochs: int = 100  # 每个子网的轮数上限。
+    joint_epochs: int = 20  # 联合阶段上限。
+    early_patience: int = 15  # 联合阶段内固定采用 min(此值, 5)。
+    batch_size: int = 128
+    learning_rate: float = 0.001
+    evaluation_checkpoint: Path | None = None
+    evaluation_data_dir: Path | None = None
+
+    # 固定实现参数：保留完整记录，一般无需调整。
     cpu_threads: int = 8  # 正式 FB 训练的 CPU 线程数，不修改其他进程的线程设置。
-    evaluation_checkpoint: Path | None = None  # None：批量复核；也可填写单个 FB checkpoint.pt 的完整路径。
-    evaluation_data_dir: Path | None = None  # None：读取 checkpoint 的数据路径；指定迁移目录时另存复核结果。
-    epochs: int = 100  # 每个子网分别预训练的轮数；3 子网共执行 3×100 轮。
-    joint_epochs: int = 20  # 预训练结束后，全部子网与融合层一起训练的轮数。
     subbands: int = 3  # 子带数；每个子带对应一个不共享权重的 SSVEPformer。
     band_step: float = 9.0  # Dataset 2 第 m 个子带的通带下限 = m×9 Hz，m 从 1 开始。
     band_high: float = 80.0  # 所有子带共同的通带上限（Hz），不同于 FFT 特征上限 64 Hz。
@@ -29,6 +35,7 @@ class FBConfig(Config):
     stopband_attenuation: float = 40.0  # 单向滤波器要求的阻带最小衰减（dB），据此自动定阶。
     bandpass: bool = False  # FB 不先执行基础 8–64 Hz Butterworth；继承的 filter_order 不参与 FB。
 
+    # 自动推导与合法性检查。
     def validate(self):
         super().validate()
         assert self.experiment.startswith("fb_"), "FB 实验目录须以 fb_ 开头，避免混入基础模型结果"
@@ -40,4 +47,4 @@ class FBConfig(Config):
         assert 0 < self.passband_ripple < self.stopband_attenuation
 
 
-CONFIG = FBConfig()  # 其他参数如学习率、Dropout、N/M 规则、评估路径均继承；可在上面同名覆盖。
+CONFIG = FBConfig()

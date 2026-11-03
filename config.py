@@ -1,58 +1,66 @@
-"""修改此处配置，然后直接运行 train.py；不使用命令行参数。"""
-
+"""实验配置：顶部修改常用选项，下方保存固定参数和自动推导规则。"""
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent  # 项目根目录，自动定位，不需修改。
+ROOT = Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)
 class Config:
-    data_dir: Path = Path(r"G:\SSVEP\data\benchmark")  # 含 S1.mat…S35.mat 和通道/频率文件的数据目录。
-    experiment: str = "ssvepformer_loso_cuda"  # 新 GPU 实验目录；旧 CPU 结果保留在 ssvepformer_loso。
-    input_type: str = "complex"  # complex：特征轴实虚拼接；time：时域；complex_channels：通道轴实虚拼接。
-    device: str = "cuda:0"  # cpu：CPU；cuda/cuda:0：第一张卡；cuda:1：第二张卡。无可用 GPU 时明确报错。
-    N: int = 35  # 留出折数：依次测试 S1…SN；其余所有被试训练，不是只使用前 N 名被试。
-    M: int = 3  # 每折独立训练的种子数，使用 seed…seed+M-1，不从其他种子模型继续训练。
-    seed: int = 2026  # 起始随机种子；M=1 时所有折均使用此种子。
-    evaluation_checkpoint: Path | None = None  # None：复核当前 N×M 计划；或填写某个 checkpoint.pt 的完整路径。
-    evaluation_data_dir: Path | None = None  # None：使用模型保存的数据路径；可指定同一 Benchmark 数据的迁移目录。
+    # 常用实验选项：日常只需修改这一段。
+    data_dir: Path = Path(r"I:\jjh\SSVEP\data\benchmark")
+    experiment: str = "ssvepformer_amplitude"  # 修改其他训练设置时换实验名。
+    input_type: str = "amplitude"  # complex / amplitude / time / complex_channels
+    duration: float = 1.0  # 窗口秒数，例如 0.5、1.0、2.0；必须对应整数采样点。
+    device: str = "cuda:1"
+    N: int = 35  # 测试 S1…SN；每折训练候选始终来自其余 34 人。
+    M: int = 3  # 每折独立种子数。
+    seed: int = 2026
+    early_stopping: bool = False  # True：独立 4 被试验证、恢复最佳模型；False：全 34 人、最后一轮。
+    epochs: int = 100  # 固定轮数 / 早停的最大轮数。新早停实验可预先设为 200。
+    early_patience: int = 15
+    batch_size: int = 128  # 7200/8160 个训练试次，约 57/64 个 batch/epoch。
+    learning_rate: float = 0.001
+    evaluation_checkpoint: Path | None = None  # 指定旧/新 checkpoint 路径可单独复核。
+    evaluation_data_dir: Path | None = None  # 服务器数据迁移后指定本地路径。
 
+    # 固定实现参数：保留完整记录，一般无需调整。
     subjects: int = 35  # 数据集固定属性：被试总数；控制折数请改 N，不要改此项。
     classes: int = 40  # 数据集固定属性：目标类别数，与 MAT 类别顺序一致。
     blocks: int = 6  # 数据集固定属性：每被试的 block 数，每 block 各类别一个试次。
     channels: tuple = ("O1", "Oz", "O2", "PO3", "POz", "PO4", "Pz", "PO5", "PO6")  # 按名称及此顺序取通道。
     sample_rate: int = 250  # 已降采样的数据采样率（Hz）；修改数值不会执行重采样。
-    duration: float = 1.0  # 每试次窗口长度（秒），须对应整数采样点；频域输入还须不超过 FFT 长度。
     start_seconds: float = 0.64  # 从试次起点裁窗：0.5 秒提示 + 0.14 秒视觉延迟。
     frequency_resolution: float = 0.2  # FFT 频率分辨率（Hz），由采样率/此值计算补零长度。
     frequency_range: tuple = (8.0, 64.0)  # 复频谱保留范围（Hz，含端点），也是带通滤波的通带。
     bandpass: bool = True  # 是否在整段试次上独立执行零相位带通，再裁窗。
     filter_order: int = 4  # Butterworth 设计阶数，供 scipy.signal.butter 使用。
-
     init_std: float = 0.01  # 卷积/线性权重初始化的标准差；论文 variance 的歧义见 README。
     spatial_multiplier: int = 2  # 通道组合输出 = 网络输入通道数 × 此值；通道拼接时默认输出 36 通道。
     encoder_blocks: int = 2  # 串联的残差子编码器数量。
     kernel_size: int = 31  # 编码器 Conv1d 沿频谱轴的卷积核长度，须为正奇数。
     head_multiplier: int = 6  # 分类头隐藏层宽度 = 类别数 × 此倍数。
     dropout: float = 0.5  # 训练时随机丢弃特征的概率；监测和测试时自动关闭。
-    epochs: int = 100  # 每折每种子的固定训练轮数；使用最后一轮，不按测试成绩选模型。
-    batch_size: int = 128  # 训练及评估批大小，末批不足此数时保留。
-    learning_rate: float = 0.001  # SGD 学习率，当前不使用学习率调度器。
     momentum: float = 0.9  # SGD 动量系数。
     weight_decay: float = 0.001  # SGD 的 L2 权重衰减系数。
-
     cpu_threads: int = 8  # PyTorch CPU 计算线程数；各折/种子按顺序运行。
     monitor_every: int = 5  # 固定训练子集监测间隔（epoch）；第 1 轮和最后一轮也监测。
     checkpoint_every: int = 5  # checkpoint 覆盖保存间隔（epoch）；最后一轮和 STOP 停止前也保存。
     gaze_seconds: float = 0.5  # ITR 的额外注视转移时间（秒），总决策时间 = duration + 此值。
     test_subject: int = 1  # 内部单折上下文；由调度器按 1…N 自动赋值，不用于选择起始折。
+    validation_subjects: int = 4  # 34 个开发被试中留 4 人，30 人训练（7200 trials）。
+    validation_seed: int = 2026  # 固定划分，与训练随机种子独立。
+    early_min_epochs: int = 30  # FB 联合阶段为 5；各阶段均不超过其轮数上限。
+    early_min_delta: float = 1e-4  # 验证交叉熵下降阈值，不是准确率百分点。
 
+    # 自动推导与合法性检查。
     @property
     def output_dir(self):
-        """输入类型自动隔离；单折路径为 实验名/输入类型/Sxx_seedxxxx。"""
+        """自动隔离实验名、输入、窗口、早停模式；单折目录位于其下。"""
         parts = Path(self.experiment).parts
-        return ROOT / "results" / parts[0] / self.input_type / Path(*parts[1:])
+        import config
+        mode = "early" if self.early_stopping else "fixed"
+        return config.ROOT / "results" / parts[0] / self.input_type / f"{self.duration:g}s" / mode / Path(*parts[1:])
 
     @property
     def samples(self):
@@ -88,13 +96,17 @@ class Config:
 
     @property
     def cache_features(self):
-        """缓存始终按真实电极存放；两种复频谱布局共用 [实部, 虚部] 缓存。"""
+        """缓存按真实电极存放；幅度谱和两种复频谱布局共用 [实部, 虚部]。"""
         return self.samples if self.input_type == "time" else 2 * self.spectral_bins
 
     def validate(self):
-        assert self.input_type in ("complex", "time", "complex_channels"), "不支持的 input_type"
+        assert self.input_type in ("complex", "time", "complex_channels", "amplitude"), "不支持的 input_type"
         assert self.device in ("cpu", "cuda") or (
             self.device.startswith("cuda:") and self.device[5:].isdigit()), "device 应为 cpu、cuda 或 cuda:编号"
+        assert isinstance(self.early_stopping, bool)
+        assert 1 <= self.validation_subjects < self.subjects - 1
+        assert isinstance(self.validation_seed, int) and 0 <= self.validation_seed < 2**32
+        assert self.early_patience > 0 and self.early_min_epochs > 0 and self.early_min_delta >= 0
         assert isinstance(self.N, int) and 1 <= self.N <= self.subjects, "N 必须在 1…subjects 之间"
         assert isinstance(self.M, int) and self.M >= 1, "M 必须为正整数"
         assert isinstance(self.seed, int) and 0 <= self.seed < 2**32

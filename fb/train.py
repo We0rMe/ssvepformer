@@ -13,8 +13,9 @@ import torch
 from filelock import FileLock
 
 from config import ROOT
+from data import subject_partition, validation_data
 from evaluate import evaluate, write_csv, write_json
-from train import seed_everything, train_epoch
+from train import seed_everything, train_epoch, fit_stages, run_identity, manifest_matches
 from fb.config import CONFIG
 from fb.data import prepare_data, split_subjects
 from fb.evaluate import plot_training, save_results, summarize
@@ -29,26 +30,22 @@ def training_plan(cfg):
 
 
 def check_manifest(cfg, audit, details):
-    ignored = {"N", "M", "experiment", "evaluation_checkpoint", "evaluation_data_dir"}
-    sources = ("data.py", "model.py", "train.py", "evaluate.py", "runtime.py",
-               "fb/data.py", "fb/model.py", "fb/train.py", "fb/evaluate.py")
-    identity = {"config": {k: v for k, v in cfg.to_dict().items() if k not in ignored},
-                "cache_id": audit["cache_id"],
-                "runtime": device_info(cfg),
-                "sources": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in sources},
-                "versions": {"python": platform.python_version(), "torch": torch.__version__,
-                             "numpy": np.__version__, "scipy": scipy.__version__}}
+    sources = ("config.py", "data.py", "model.py", "train.py", "evaluate.py", "runtime.py",
+               "fb/config.py", "fb/data.py", "fb/model.py", "fb/train.py", "fb/evaluate.py")
+    identity = run_identity(cfg, fb=True)
+    identity["cache_id"] = audit["cache_id"]
     signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
     manifest = details / "settings.json"
     if manifest.exists():
-        if json.loads(manifest.read_text(encoding="utf-8"))["signature"] != signature:
+        previous = json.loads(manifest.read_text(encoding="utf-8"))
+        if not manifest_matches(previous, identity, details, fb=True):
             raise ValueError("FB 训练设置、数据或实现已变化，请使用新的 experiment")
-        return signature
+        return previous["signature"]
     write_json(manifest, {"config": cfg.to_dict(), "signature": signature, "identity": identity,
-                          "plan": training_plan(cfg), "split": f"S{cfg.test_subject} test; all others train",
+                          "plan": training_plan(cfg), "split": subject_partition(cfg),
                           "monitor": "First block of each training subject; not an independent validation set"})
     write_json(details / "data_audit.json", audit)
-    for name in (*sources, "config.py", "fb/config.py", "fb/README.md", "requirements.txt"):
+    for name in (*sources, "fb/README.md", "requirements.txt"):
         target = details / "source" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, target)
@@ -66,63 +63,11 @@ def save_checkpoint(path, model, optimizer, cfg, signature, cache_id, stage_inde
     temporary.replace(path)
 
 
-def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id, should_stop, message):
-    """只接收训练数据；测试数据没有进入这段两阶段训练代码的接口。"""
-    checkpoint = details / "checkpoint.pt"
-    history, saved = [], None
-    if checkpoint.exists():
-        saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        if saved["signature"] != signature or saved["cache_id"] != cache_id:
-            raise ValueError("FB checkpoint 与当前设置或数据不匹配")
-        model.load_state_dict(saved["model"])
-        restore_rng(saved, model)
-        history = saved["history"]
-    for stage_index, (stage, band, epochs) in enumerate(training_plan(cfg)):
-        if saved is not None and stage_index < saved["stage_index"]:
-            continue
-        network = model if band is None else model.subnetworks[band]
-        stage_x = x if band is None else x[:, band]
-        monitor_x, monitor_y = stage_x[monitor_indices], y[monitor_indices]
-        # 每个子网独立优化；联合阶段新建 SGD，同时更新所有子网与融合层。
-        optimizer = torch.optim.SGD(network.parameters(), lr=cfg.learning_rate,
-                                    momentum=cfg.momentum, weight_decay=cfg.weight_decay)
-        start = 0
-        if saved is not None and stage_index == saved["stage_index"]:
-            optimizer.load_state_dict(saved["optimizer"])
-            optimizer_to(optimizer, next(model.parameters()).device)
-            start = saved["epoch"]
-        message(f"{stage}: {start}/{epochs} epoch | {'全网联合训练' if band is None else '独立子网预训练'}")
-        for epoch in range(start + 1, epochs + 1):
-            if should_stop():
-                save_checkpoint(checkpoint, model, optimizer, cfg, signature, cache_id,
-                                stage_index, epoch - 1, history)
-                raise InterruptedError("STOP：已保存当前阶段，停止整个 FB 计划")
-            tick = time.perf_counter()
-            loss, accuracy = train_epoch(network, optimizer, stage_x, y, cfg, stage_index * cfg.epochs + epoch)
-            monitor = None
-            if epoch == 1 or epoch % cfg.monitor_every == 0 or epoch == epochs:
-                monitor, _ = evaluate(network, monitor_x, monitor_y, cfg)
-            history.append({"stage": stage, "epoch": epoch, "train_loss": loss, "train_acc": accuracy,
-                            "monitor_loss": monitor["loss"] if monitor else None,
-                            "monitor_acc": monitor["acc_percent"] if monitor else None,
-                            "seconds": time.perf_counter() - tick})
-            write_csv(details / "history.csv", history)
-            stop = should_stop()
-            if epoch % cfg.checkpoint_every == 0 or epoch == epochs or stop:
-                save_checkpoint(checkpoint, model, optimizer, cfg, signature, cache_id,
-                                stage_index, epoch, history)
-            write_json(details / "status.json", {"state": "training", "stage": stage, "epoch": epoch,
-                                                  "epochs": epochs, "train_loss": loss,
-                                                  "train_acc_dropout_on": accuracy,
-                                                  "monitor_acc_dropout_off": history[-1]["monitor_acc"]})
-            suffix = f" | train monitor OFF={monitor['acc_percent']:.2f}%" if monitor else ""
-            message(f"{stage} {epoch:03d}/{epochs} | loss={loss:.4f} | train ACC ON={accuracy:.2f}%"
-                    f"{suffix} | {history[-1]['seconds']:.1f}s")
-            if monitor:
-                plot_training(history, details.parent)
-
-            if stop:
-                raise InterruptedError("STOP：已保存当前阶段，停止整个 FB 计划")
+def train_stages(model, x, y, monitor_indices, cfg, details, signature, cache_id, should_stop, message,
+                 validation=None):
+    """兼容原调用接口；训练监测按实际训练被试重建，验证集单独传入。"""
+    history, _ = fit_stages(model, x, y, cfg, details, signature, cache_id, training_plan(cfg),
+                            should_stop, message, plot_training, validation, "FB-SSVEPformer")
     return history
 
 
@@ -150,20 +95,18 @@ def run_single(cfg, features, audit, stop_path):
                                  "parameters": parameters}
             write_json(details / "settings.json", settings)
             message(f"FB 输入 {cfg.input_type}: {cfg.subbands}×{cfg.input_channels}×{cfg.features} | 参数量 {parameters:,}")
-            monitor_indices = torch.cat([torch.arange(i * cfg.classes * cfg.blocks,
-                                                      i * cfg.classes * cfg.blocks + cfg.classes)
-                                         for i in range(cfg.subjects - 1)])
             should_stop = lambda: stop_path.exists() or (details / "STOP").exists()
-            history = train_stages(model, x, y, monitor_indices, cfg, details, signature,
-                                   audit["cache_id"], should_stop, message)
+            history, selections = fit_stages(
+                model, x, y, cfg, details, signature, audit["cache_id"], training_plan(cfg),
+                should_stop, message, plot_training, validation_data(features, cfg), "FB-SSVEPformer")
             if should_stop():
                 raise InterruptedError("STOP：联合训练已保存，最终测试尚未执行")
             # 所有子网预训练和联合训练均结束后，才使用留出被试进行最终测试。
             train_metrics, _ = evaluate(model, x, y, cfg)
             test_metrics, predictions = evaluate(model, test_x, test_y, cfg)
             metric = save_results(cfg, model, history, test_metrics, train_metrics, predictions,
-                                  test_y.numpy(), audit["target_frequencies"])
-            write_json(details / "status.json", {"state": "complete", "stage": "joint", "epoch": cfg.joint_epochs})
+                                  test_y.numpy(), audit["target_frequencies"], selections=selections)
+            write_json(details / "status.json", {"state": "complete", "stage": "joint", "epoch": history[-1]["epoch"], "selections": selections})
             message(f"FB TEST S{cfg.test_subject}: ACC={metric['ACC_percent']:.2f}% | "
                     f"ITR={metric['ITR_bits_min']:.2f} bits/min | {metric['correct']}/{metric['trials']}")
             return True

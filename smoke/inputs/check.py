@@ -22,7 +22,7 @@ from fb.train import run_single as run_fb_single
 from model import SSVEPformer
 from train import run_single, seed_everything, train_epoch
 
-TYPES = ("complex", "time", "complex_channels")
+TYPES = ("complex", "amplitude", "time", "complex_channels")
 
 
 def check_features():
@@ -124,7 +124,7 @@ def check_end_to_end(output):
                 with patch(target, return_value=(features, audit)):
                     assert (evaluate_fb_checkpoint if fb else evaluate_checkpoint)(checkpoint)
                 assert len(summarize(plan)) == 1
-            assert len(list((Path(temp) / "results" / cfg.experiment).iterdir())) == 3
+            assert len(list((Path(temp) / "results" / cfg.experiment).iterdir())) == 4
 
 
 def check_saved_baseline():
@@ -159,11 +159,11 @@ def main():
     counts = check_features()
     check_end_to_end(output)
     baseline = check_saved_baseline()
-    write_json(output / "checks.json", {"checks": ["Both models: all three inputs, gradients, shapes and channel permutation",
+    write_json(output / "checks.json", {"checks": ["Both models: all four inputs, gradients, shapes and channel permutation",
                "Spectral cache reuse; time cache isolation; held-out data isolation",
-               "Six synthetic train/evaluate/report workflows and checkpoint input types", baseline],
+               "Eight synthetic train/evaluate/report workflows and checkpoint input types", baseline],
                "models": counts, "formal_training_started": False, "device": "cpu"})
-    print("PASS: three input representations for both models;", baseline, flush=True)
+    print("PASS: four input representations for both models;", baseline, flush=True)
 
 
 if __name__ == "__main__":

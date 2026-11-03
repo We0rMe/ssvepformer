@@ -51,6 +51,11 @@ def window_features(windows, cfg):
 
 def network_input(values, cfg):
     """每折训练/评估前转换一次；前导轴可包含 FB 子带，绝不跨试次或子带拼接。"""
+    if cfg.input_type == "amplitude":
+        if values.shape[-2:] != (len(cfg.channels), 2 * cfg.spectral_bins):
+            raise ValueError("幅度谱需要 [真实电极, 实部频点+虚部频点] 缓存")
+        real, imaginary = np.split(values, 2, axis=-1)
+        return np.hypot(real, imaginary).astype(np.float32)
     if cfg.input_type != "complex_channels":
         return values
     if values.shape[-2:] != (len(cfg.channels), 2 * cfg.spectral_bins):
@@ -122,10 +127,30 @@ def _prepare_cache(cfg, directory, cache_id, spec):
 
 def split_subjects(features, cfg):
     test_index = cfg.test_subject - 1
-    training_indices = [s for s in range(cfg.subjects) if s != test_index]
+    training_indices = [s - 1 for s in subject_partition(cfg)["train"]]
     assert test_index not in training_indices
     labels = np.tile(np.arange(cfg.classes, dtype=np.int64), cfg.blocks)
     train_x = network_input(np.concatenate([features[s] for s in training_indices]), cfg)
     test_x = network_input(np.array(features[test_index], copy=True), cfg)
     return (torch.from_numpy(train_x), torch.from_numpy(np.tile(labels, len(training_indices))),
             torch.from_numpy(test_x), torch.from_numpy(labels.copy()))
+
+
+def subject_partition(cfg):
+    """划分只依赖固定验证种子和外层被试，不随输入/窗口/训练种子变化。"""
+    candidates = [s for s in range(1, cfg.subjects + 1) if s != cfg.test_subject]
+    validation = []
+    if cfg.early_stopping:
+        rng = np.random.default_rng(np.random.SeedSequence([cfg.validation_seed, cfg.test_subject]))
+        validation = sorted(int(s) for s in rng.choice(candidates, cfg.validation_subjects, replace=False))
+    training = [s for s in candidates if s not in validation]
+    return {"train": training, "validation": validation, "test": [cfg.test_subject]}
+
+
+def validation_data(features, cfg):
+    subjects = subject_partition(cfg)["validation"]
+    if not subjects:
+        return None
+    values = network_input(np.concatenate([features[s - 1] for s in subjects]), cfg)
+    labels = np.tile(np.arange(cfg.classes, dtype=np.int64), cfg.blocks * len(subjects))
+    return torch.from_numpy(values), torch.from_numpy(labels)

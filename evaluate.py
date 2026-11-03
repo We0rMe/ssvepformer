@@ -76,6 +76,11 @@ def plot_training(history, directory):
         ax.plot(epoch, [r[online_key] for r in history], label="Training batches (dropout ON)", marker="." if len(epoch) == 1 else None)
         ax.plot([r["epoch"] for r in monitor], [r[monitor_key] for r in monitor], ".-",
                 label="Fixed training subset (dropout OFF)")
+        validation = [r for r in history if r.get("val_loss") is not None]
+        val_key = "val_loss" if online_key == "train_loss" else "val_acc"
+        if validation:
+            ax.plot([r["epoch"] for r in validation], [r[val_key] for r in validation],
+                    color="tab:green", label="Held-out validation subjects (dropout OFF)")
         ax.set(xlabel="Epoch", ylabel=label)
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8)
@@ -84,7 +89,25 @@ def plot_training(history, directory):
     plt.close(fig)
 
 
-def save_results(cfg, history, test, train, predictions, labels, frequencies, output=None, parameters=None):
+def training_description(cfg, history, selections=None):
+    from data import subject_partition
+    split = subject_partition(cfg)
+    text = (f"S{cfg.test_subject} 测试；{len(split['train'])} 名被试训练；"
+            f"{len(split['validation'])} 名独立被试验证。")
+    if cfg.early_stopping:
+        text += "按验证交叉熵早停，恢复各阶段验证损失最低的权重。"
+    else:
+        text += "关闭早停，各阶段采用固定最后一轮模型。"
+    if selections:
+        text += "\n" + "；".join(
+            f"{item['stage']}：实际 {item['epochs_ran']} 轮，采用第 {item['selected_epoch']} 轮"
+            for item in selections) + "。"
+    else:
+        text += f"实际训练轮次记录：{len(history)} 条。"
+    return text
+
+
+def save_results(cfg, history, test, train, predictions, labels, frequencies, output=None, parameters=None, selections=None):
     output = output or cfg.output_dir
     details = output / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
@@ -110,7 +133,10 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
     fig.savefig(output / "confusion.png", dpi=150)
     plt.close(fig)
     minutes = sum(row["seconds"] for row in history) / 60
+    protocol = training_description(cfg, history, selections)
+    write_json(details / "selection.json", {"early_stopping": cfg.early_stopping, "stages": selections or []})
     reference = {
+        "amplitude": "幅度谱是本实验新增条件，此处不指定论文对照值。",
         "complex": "论文的 80.40% ACC、149.95 bits/min 是 35 名被试平均结果。",
         "time": "论文表 7 的时域输入 ACC 为 71.21 ± 23.38%（35 名被试；表 7 未报告 ITR）。",
         "complex_channels": "沿通道拼接是新增对比，论文表 7 没有该布局的对应结果。",
@@ -125,14 +151,15 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
 | 最终训练集 ACC（关闭 Dropout） | {train['acc_percent']:.2f}% |
 | 最后一轮训练 ACC（开启 Dropout） | {history[-1]['train_acc']:.2f}% |
 
-设置：S{cfg.test_subject} 测试，其余 {cfg.subjects - 1} 名被试训练；种子 {cfg.seed}；{cfg.duration:g} 秒；{cfg.epochs} epoch；设备 {cfg.device}。
+设置：种子 {cfg.seed}；{cfg.duration:g} 秒；设备 {cfg.device}。
+{protocol}
 输入：{cfg.input_type}，每试次 {cfg.input_channels}×{cfg.features}；模型参数量：{parameters if parameters is not None else '未记录'}。
-训练与训练集监测耗时约 {minutes:.1f} 分钟。固定最后一轮模型，测试集未参与早停或选模。
+训练、训练集监测及验证耗时约 {minutes:.1f} 分钟。测试集未参与早停或选模。
 
-`training.png` 中蓝线是各训练批次开启 Dropout 的指标；橙线是固定训练子集关闭 Dropout 的监测指标，**不是验证集**。
+`training.png` 中蓝线是各训练批次开启 Dropout 的指标；橙线是固定训练子集关闭 Dropout 的监测指标，**不是验证集**。若开启早停，绿色曲线才是独立验证被试的指标。
 测试集只在训练结束后评估。单次、单被试实验不报告“均值 ± 标准差”。
 
-{reference} 当前 S{cfg.test_subject} 单被试结果不构成全被试复现结论。
+{reference} 上述论文指标仅供背景参考；窗口、划分或训练协议不同不能直接视为复现对照。当前 S{cfg.test_subject} 单被试结果不构成全被试复现结论。
 详细配置、训练逐轮 CSV、预测明细、模型和代码快照均在 `reproducibility/`。
 """
     
@@ -197,7 +224,7 @@ def summarize(cfg, *, evaluation=False):
         lines += ["", f"每个种子先对 {cfg.N} 名被试取平均，再在 {cfg.M} 个种子间统计：",
                   f"ACC：{mean_sd(means[:, 0])}%；ITR：{mean_sd(means[:, 1])} bits/min。",
                   "这里的标准差反映种子间变化，与上表的被试间标准差含义不同。"]
-    lines += ["", "每折均使用固定最后一轮模型；留出被试不参与该折训练或选模。",
+    lines += ["", ("每折使用独立验证集损失最低的模型。" if cfg.early_stopping else "每折使用固定最后一轮模型。") + "留出测试被试不参与该折训练或选模。",
               "35 折全完成时才构成全被试 LOSO 评估。折间训练集重叠，不能把 N×M 个结果视作相互独立的样本。",
               "各折目录包含关键指标与图像；配置、checkpoint、明细和代码快照在各自 reproducibility/ 中。"]
     (cfg.output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -209,6 +236,8 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     from model import SSVEPformer
     checkpoint = Path(checkpoint).resolve()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if state.get("model_name", "SSVEPformer") != "SSVEPformer":
+        raise ValueError("FB 模型请使用 python -m fb.evaluate")
     values = state["config"].copy()
     values.setdefault("input_type", "complex")  # 旧模型始终使用原始复频谱，不能被当前输入选择覆盖。
     trained_device = values.get("device", "cpu")
@@ -219,23 +248,26 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     if data_dir is not None:
         values["data_dir"] = Path(data_dir)
     cfg = Config(**values)
-    if state["epoch"] != cfg.epochs:
+    complete = state.get("training_complete", state["epoch"] == cfg.epochs)
+    if not complete:
         print(f"跳过未完成模型：{checkpoint} ({state['epoch']}/{cfg.epochs})", flush=True)
         return False
     cfg.validate()
     selected_device = configure_device(cfg)
     features, audit = prepare_data(cfg)
+    if data_dir is None and state.get("format_version") == 2 and audit["cache_id"] != state["cache_id"]:
+        raise ValueError("原始数据/处理代码发生变化；独立复核请显式设置 evaluation_data_dir")
     x, y, test_x, test_y = split_subjects(features, cfg)
     model = SSVEPformer(cfg).to(selected_device)
     model.load_state_dict(state["model"])
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
     # 更换数据目录或推理设备的复核另存，避免替换原实验的正式指标。
-    same_context = data_dir is None and cfg.device == trained_device and "input_type" in state["config"]
+    same_context = data_dir is None and cfg.device == trained_device and state.get("format_version") == 2
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, state["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output=output,
-                          parameters=sum(p.numel() for p in model.parameters()))
+                          parameters=sum(p.numel() for p in model.parameters()), selections=state.get("selections"))
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir),
                 "test_subject": cfg.test_subject, "epoch": state["epoch"], "cache_id": audit["cache_id"],

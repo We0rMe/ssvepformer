@@ -11,7 +11,7 @@ FB 的缓存以 `fb_` 开头，实验目录也以 `fb_` 开头，不使用基础
 
 | 文件 | 用途 |
 |---|---|
-| `config.py` | FB 参数和共享参数的覆盖处 |
+| `config.py` | 顶部常用实验选项，下方固定设置与检查 |
 | `data.py` | 时域滤波器组、特征缓存 |
 | `model.py` | 独立子网及可学习融合层 |
 | `train.py` | 两阶段训练、恢复、LOSO 调度 |
@@ -62,78 +62,23 @@ FFT 用实际窗口采样点数归一化；补零加密频率采样网格，并�
 参考：[正式论文](https://doi.org/10.1016/j.neunet.2023.04.045)、[SciPy 定阶](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.cheb1ord.html)、[SciPy 滤波器设计](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.cheby1.html)。
 用户提供的[第三方项目](https://github.com/okbalefthanded/ssvepformer)介绍的是 Dataset 1 的基础模型复现，不能作为本 FB 实现在 Benchmark 上达到论文精度的证据。
 
-## 如何修改参数、启动与复核
+## 如何运行
 
-修改 `fb/config.py`，不必改动根配置。`FBConfig` 继承根 `Config` 默认值，因此通用参数的含义一致。
-`input_type` 在 FB 中独立设置：complex（原始 9×562）、time（每子带 9×250 时域）、complex_channels（每子带 18×281）。其余比较口径、参数量和论文表 7 参考值见根 README 的“输入特征对比”。
-time 仍使用 FB 的 9–80、18–80、27–80 Hz 滤波，不叠加基础模型的 8–64 Hz 滤波。两种复频谱输入共用缓存，通道拼接在每折训练/评估前完成。
-需要调整学习率、线程数或评估路径时，可直接在 `FBConfig` 中同名覆盖，例如 `cpu_threads: int = 4`。
-继承的 `filter_order` 不用于 FB；`bandpass` 固定为 False，表示不额外串联基础 Butterworth。
-`frequency_range` 在 FB 中仅控制 FFT 特征范围；`band_step/band_high` 控制子带通带。
+修改 `fb/config.py`，数据路径默认沿用根配置；输入、窗口、训练参数独立。固定滤波与结构参数放在同一文件的常用选项下方。默认 cuda:0、N=35、M=3、complex、1 秒、关闭早停；原 FB 网络与滤波器组保持不变。
 
-当前配置为 cuda:1、N=35、M=3、seed=2026，运行完整 LOSO，每折种子为 2026、2027、2028。
-`device="cuda:1"` 可使用第二张卡；无 GPU 的本地检查设置 cpu，不能依赖自动回退。
-每折仍然使用其余全部 34 名被试训练；同一折的不同种子从头初始化，不共享训练所得权重。
-每次默认实际执行 3×100+20=320 个阶段内 epoch，其中联合 epoch 同时训练三个子网，耗时高于基础模型。
-
-本次不自动启动 FB 正式任务，训练由你在服务器终端启动。
-准备运行时，在项目根目录 PowerShell 中执行：
+`input_type` 支持 complex、amplitude、time、complex_channels；输入形状分别为每子带 9×562、9×281、9×round(250×duration)、18×281。幅度谱是复频谱的模，不是功率谱。
 
 ```powershell
-Set-Location G:\SSVEP\SSVEPformer
-conda activate ssvepformer-gpu
 python -u -m fb.train
-```
-
-日志直接显示在当前终端。不能用 `python fb/train.py` 代替 `-m fb.train`，否则同名模块的导入路径可能混淆。
-运行前可确认实际生效的继承参数：
-
-```powershell
-python -c "from fb.config import CONFIG as c; c.validate(); print(c.to_dict())"
-```
-
-两张卡均可见时，建议基础模型使用 cuda:0、FB 使用 cuda:1，在两个终端分别运行，共用现有环境即可。
-若设置过 CUDA_VISIBLE_DEVICES，cuda 编号对应筛选后的可见设备顺序，先检查 torch.cuda.device_count()。
-同卡启动两个独立训练进程也是可行的，但显存空闲不代表计算资源空闲；可能发生资源竞争，使两个任务变慢。
-两模型仍会共享 CPU、系统内存和磁盘；需要减少 CPU 竞争时，仅在 FBConfig 中覆盖 cpu_threads。
-不要为了占满显存而修改 batch_size，以免改变当前复现实验设置。
-训练完成自动测试，无需再运行评估才能得到结果。另行复核保存模型：
-
-```powershell
 python -u -m fb.evaluate
 ```
 
-默认复核 FB 当前 N/M 计划中已完成联合训练的模型，预训练 checkpoint 不用于测试。
-单模型复核可将 `evaluation_checkpoint` 改为 `Path(r"完整的 FB checkpoint.pt 路径")`。
-数据路径默认从 checkpoint 读取；同一份 Benchmark 迁移后可同名覆盖 `evaluation_data_dir`。评估使用当前配置的 device，指定新数据路径或改变设备的复核结果另存至 checkpoint 旁的 `reevaluation/`，不会改写原成绩。
+必须从项目根目录以模块方式启动。单独复核 checkpoint 时，在 fb/config.py 中设置 evaluation_checkpoint；字符串路径也可直接使用。数据迁移后设置 evaluation_data_dir。
 
-## 缓存、恢复和输出
+早停关闭时为 34 人训练、1 人测试，三个子网各 100 轮后联合 20 轮。开启时为 30 人训练、4 人验证、1 人测试，各子网独立按验证交叉熵早停并恢复最佳权重；之后联合阶段再独立早停。子网默认至少 30 轮、patience=15；联合至少 5 轮、patience=min(early_patience,5)，均不超过配置的阶段上限。验证名单跨表示、窗口、种子固定；不使用测试被试选模。
 
-首次运行生成独立 FB 缓存：一个 `features.npy`（默认约 486 MiB）和 `audit.json`。
-以后各折/种子共用该缓存。N、M、seed 不进入缓存标识；数据文件路径/大小/修改时间、预处理设置和相关处理代码变化才会产生新缓存。
-“每折独立配置”是为每次实验填写测试被试、种子、结果路径，并非复制或重新处理整套原始数据。
+输出自动进入 `results/<fb_experiment>/<input_type>/<duration>s/<fixed或early>/`。每个阶段的实际执行轮数、采用轮次和停止原因保存在单折 reproducibility/selection.json。新 checkpoint 支持恢复当前阶段、优化器、早停计数和随机状态；已完成子网不重复训练。
 
-```text
-results/fb_ssvepformer_loso_cuda/<input_type>/
-  report.md, summary.csv                 # 总进度和均值 ± 标准差
-  reproducibility/plan.json
-  S01_seed2026/
-    report.md, metrics.csv               # 关键结果
-    training.png, confusion.png          # 按阶段分行绘制的训练曲线；最终混淆矩阵
-    reproducibility/                    # 配置、数据审查、训练记录、预测、融合权重、模型、代码快照
-```
+在计划或单折 reproducibility 目录创建 STOP 可停止整个计划，删除后用相同命令恢复。原有结果保留；旧格式断点仅作显式评估，不接续新版训练。缓存、配置公平性、报告和完整操作说明见[根 README](../README.md)。
 
-每个实验只保留一个最新 checkpoint，包含所有子网、融合层、当前阶段的优化器、阶段编号、epoch 和 CPU/所选 CUDA 设备的随机数状态。
-中断后重新运行原命令会恢复当前阶段，不重复已完成的子网；完成项会跳过。
-只增减 N/M 可补跑/缩小计划；更换子带数、滤波或训练设置时请换新的 `experiment`。
-
-创建 `results/fb_ssvepformer_loso_cuda/<input_type>/reproducibility/STOP` 可在 epoch 边界保存并停止当前输入的 FB 计划。
-也可在当前单折的 reproducibility 中创建 STOP；恢复前删除它。Ctrl+C 恢复至最近一次定期保存的 checkpoint。
-FB 的 STOP、锁、日志与基础模型完全分开。
-
-训练监测始终只取本折训练被试的第一 block，关闭 Dropout；不按监测值早停。
-测试被试只在联合训练结束后使用。各折独立 LOSO；此前开发诊断使用过部分被试的数据，这并非未经开发观察的外部验证。
-ITR 的决策时间是窗口长度加 0.5 秒。总报告区分被试间与种子间标准差，只有一个结果时不报告标准差。
-
-轻量检查脚本：`python -m smoke.fb.check`。只使用少量合成/训练侧数据，单线程，不生成正式实验或全量 FB 缓存；结果均在 `smoke/fb/results/`。
-服务器另运行 `python -m smoke.gpu.check`，实际检测 GPU 上的计算、评估与断点恢复；本机无 GPU 时该部分会明确跳过。
+新功能检查：`python -u -m smoke.experiments.check`，无需原始数据，覆盖两个模型、四种输入、三种窗口、早停和断点恢复。设备检查：`python -u -m smoke.gpu.check`。原 `smoke.fb.check` 仍可在具备 Benchmark 数据的环境运行滤波与真实试次检查。

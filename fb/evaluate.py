@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from filelock import FileLock
 
-from evaluate import evaluate, itr, plt, summarize as summarize_base, write_csv, write_json
+from evaluate import evaluate, itr, plt, summarize as summarize_base, write_csv, write_json, training_description
 from fb.config import CONFIG, FBConfig
 from fb.data import prepare_data, split_subjects
 from fb.model import FBSSVEPformer
@@ -26,6 +26,10 @@ def plot_training(history, output):
                     label="Training batches (dropout ON)")
             ax.plot([r["epoch"] for r in monitored], [r[f"monitor_{key}"] for r in monitored],
                     ".-", label="Fixed training subset (dropout OFF)")
+            validation = [r for r in rows if r.get("val_loss") is not None]
+            if validation:
+                ax.plot([r["epoch"] for r in validation], [r[f"val_{key}"] for r in validation],
+                        color="tab:green", label="Held-out validation subjects (dropout OFF)")
             ax.set(title=stage, xlabel="Epoch within stage", ylabel=ylabel)
             ax.grid(alpha=0.25)
             ax.legend(fontsize=8)
@@ -34,7 +38,7 @@ def plot_training(history, output):
     plt.close(fig)
 
 
-def save_results(cfg, model, history, test, train, predictions, labels, frequencies, output=None):
+def save_results(cfg, model, history, test, train, predictions, labels, frequencies, output=None, selections=None):
     output = output or cfg.output_dir
     details = output / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
@@ -61,6 +65,8 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
     fig.colorbar(im, ax=ax, label="Trials")
     fig.savefig(output / "confusion.png", dpi=150)
     plt.close(fig)
+    protocol = training_description(cfg, history, selections)
+    write_json(details / "selection.json", {"early_stopping": cfg.early_stopping, "stages": selections or []})
     report = f"""# FB-SSVEPformer · S{cfg.test_subject} 测试结果
 
 | 指标 | 结果 |
@@ -70,13 +76,14 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
 | 正确 / 总试次 | {test['correct']} / {test['total']} |
 | 最终训练集 ACC（Dropout OFF） | {train['acc_percent']:.2f}% |
 
-S{cfg.test_subject} 留出测试，其余 {cfg.subjects - 1} 名被试训练；seed={cfg.seed}，窗口 {cfg.duration:g} 秒，设备 {cfg.device}。
+{protocol}
+seed={cfg.seed}，窗口 {cfg.duration:g} 秒，设备 {cfg.device}。
 输入：{cfg.input_type}，每试次 {cfg.subbands}×{cfg.input_channels}×{cfg.features}；模型参数量：{sum(p.numel() for p in model.parameters())}。
-{cfg.subbands} 个独立子网各预训练 {cfg.epochs} 轮，再联合训练 {cfg.joint_epochs} 轮。
-训练及训练集监测共 {sum(r['seconds'] for r in history) / 60:.1f} 分钟；使用最后一轮联合模型。
+{cfg.subbands} 个独立子网各预训练至多 {cfg.epochs} 轮，再联合训练至多 {cfg.joint_epochs} 轮。
+训练、训练集监测及验证共 {sum(r['seconds'] for r in history) / 60:.1f} 分钟。
 预训练阶段不评估测试被试；测试集不参与梯度计算、早停或选模。
 
-training.png 按子网预训练和联合训练分别绘图。橙线来自固定训练子集，不是验证集。
+training.png 按子网预训练和联合训练分别绘图。橙线来自固定训练子集，不是验证集；开启早停时的绿线来自独立验证被试。
 每次实验仅报告单次成绩，跨被试/种子的均值与标准差见上一级总报告。
 滤波器系数、配置、各阶段逐轮记录、可学习融合权重、预测和 checkpoint 统一保存于 reproducibility/。
 """
@@ -110,7 +117,7 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
         values["data_dir"] = Path(data_dir)
     cfg = FBConfig(**values)
     cfg.validate()
-    if not saved["training_complete"] or saved["stage_index"] != cfg.subbands or saved["epoch"] != cfg.joint_epochs:
+    if not saved["training_complete"] or saved["stage_index"] != cfg.subbands:
         print(f"跳过未完成联合训练的模型：{checkpoint}", flush=True)
         return False
     selected_device = configure_device(cfg)
@@ -122,10 +129,10 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     model.load_state_dict(saved["model"])
     train, _ = evaluate(model, x, y, cfg)
     test, predictions = evaluate(model, test_x, test_y, cfg)
-    same_context = data_dir is None and cfg.device == trained_device and "input_type" in saved["config"]
+    same_context = data_dir is None and cfg.device == trained_device and saved.get("format_version") == 2
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, model, saved["history"], test, train, predictions,
-                          test_y.numpy(), audit["target_frequencies"], output)
+                          test_y.numpy(), audit["target_frequencies"], output, selections=saved.get("selections"))
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir), "cache_id": audit["cache_id"],
                 "trained_device": trained_device, "evaluation_runtime": device_info(cfg)})

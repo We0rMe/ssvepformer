@@ -1,148 +1,118 @@
-# SSVEPformer / FB_SSVEPformer
+# SSVEPformer / FB-SSVEPformer
 
-## 运行
+## 日常实验配置
 
-项目与环境准备：
+基础模型只修改 `config.py`，FB 模型只修改 `fb/config.py`。FB 的数据路径默认沿用基础配置；输入、窗口和训练选项独立设置。两个配置文件都把常用选项放在类定义顶部，固定的数据集、滤波和网络参数收在下方，完整数值仍写入每次实验的快照和 checkpoint。
 
-```powershell
-git clone https://github.com/We0rMe/ssvepformer
-cd SSVEPformer
-conda create -n ssvepformer-gpu python=3.11 pip -y
-conda activate ssvepformer-gpu
-python -m pip install -r requirements.txt
-python -m pip check
-nvidia-smi
-python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available(), torch.cuda.device_count())"
+例如在 config.py 顶部 Config 类的“常用实验选项”段修改（FB 修改 FBConfig 类）：
+
+```python
+input_type: str = "amplitude"  # complex / amplitude / time / complex_channels
+duration: float = 0.5            # 窗口秒数，例如 0.5、1.0、2.0
+early_stopping: bool = True
+epochs: int = 100             # 关闭早停：固定轮数；开启：最大轮数
+early_patience: int = 15
+batch_size: int = 128
+learning_rate: float = 0.001
 ```
 
-实验环境使用 64 位 Python 3.11、`torch==2.14.1+cu126`。
-把 Benchmark 数据路径填写到 `config.py` 的 `data_dir` 处，并检查 `device="cuda:0"`、`experiment="ssvepformer_loso_cuda"`、`N=35`、`M=3`、`seed=2026`。
-注意：
-- GPU 不可用或编号错误会直接报错，不会悄悄退回 CPU。
-- 切换 input_type 会自动使用独立目录；改变其他训练设置或重复整组实验时再更换 experiment，已有不匹配配置会报错。
+默认仍为 complex、1 秒、关闭早停、100 轮，便于延续原固定轮数协议。N=35 表示依次测试 S1–S35，M=3 表示每折用 2026–2028 三个种子从头训练。N 仅控制测试折数，不会把训练集缩为前 N 名被试。
 
+## 输入和窗口
 
-设备检查，而后启动训练SSVEPformer：
+| input_type | 含义 | 基础模型 / 每个 FB 子网的输入 |
+|---|---|---|
+| `complex` | 沿特征轴拼接 `[Re, Im]` | 9×562 |
+| `amplitude` | `sqrt(Re² + Im²)`，幅度谱 | 9×281 |
+| `time` | 滤波后裁窗的时域信号 | 9×round(250×duration) |
+| `complex_channels` | 沿通道轴拼接实部和虚部 | 18×281 |
+
+幅度谱是归一化 FFT 的模，不是功率谱，没有额外平方、对数或单边倍增。与复频谱使用同一个滤波、裁窗和 FFT 结果，只去掉相位；FB 对每个子带分别应用同样转换。三种频域表示共享 `[Re, Im]` 缓存，time 使用独立缓存；不同窗口独立缓存。
+
+窗口从试次起点后 0.64 秒开始，采样率 250 Hz，必须精确对应整数采样点。因此 0.5、1、2 秒有效，0.25 秒对应 62.5 点会被拒绝；如需更短窗口可预先统一选择 0.2 秒等合法值。频域窗口最长 5 秒。FFT 固定补零到 1250 点，保留 8–64 Hz、含端点共 281 个频点；0.2 Hz 是频率采样网格，补零不会提高短窗本身的分辨能力。
+
+网络尺寸随输入自动适配，并在报告记录参数量。时域窗口变短会减少网络参数；幅度谱和复频谱的参数量也不同。这是相同结构规则下的表示对比，不是参数量严格相同的对照。时频双分支及分类融合不在本次新增功能中。
+
+保持原来的“整试次零相位滤波，再裁窗”，使用了窗口之外的同试次上下文，因此短窗口实验仍属于离线解码评估。
+
+## 早停协议与默认参数
+
+| 设置 | 早停关闭 | 早停开启 |
+|---|---|---|
+| 每折训练 | 34 人，8160 试次 | 30 人，7200 试次 |
+| 独立验证 | 不使用 | 4 人，960 试次 |
+| 最终测试 | 留出的 1 人，240 试次 | 留出的 1 人，240 试次 |
+| 模型选择 | 固定最后一轮 | 验证交叉熵最低的一轮 |
+
+验证被试从测试被试之外的 34 人中固定抽取。划分种子固定为 2026，并结合外层测试被试编号；同一折不同输入、窗口和训练种子共用相同验证名单。名单保存在 `reproducibility/settings.json` 的 `split` 字段。测试集仅在训练和选模完成后评估。
+
+对当前训练量，batch=128 对应约 57（早停）或 64（固定）次参数更新/轮；保留已复现的 SGD 学习率 0.001、momentum=0.9、weight_decay=0.001、dropout=0.5，作为统一起点，不声称已经调优。
+
+早停每轮验证一次，patience=15，显著改善阈值为交叉熵下降超过 1e-4；至少训练 30 轮（若上限不足 30 则以上限为准）。耐心计数使用显著改善阈值，但保存的最佳模型始终对应实际最低验证损失，包括小于阈值的改善。达到上限也恢复最佳模型。若决定把上限设为 200，请在一组实验开始前统一设置，并换新的 experiment。
+
+FB 的三个子网分别早停、恢复各自最佳权重后再联合训练；联合阶段默认至多 20 轮，至少 5 轮，耐心为 min(early_patience, 5)。各阶段共用同一组独立验证被试，验证数据不参与梯度计算。
+
+早停开关会改变训练人数，不能把开启与关闭的成绩差异全部归因于早停。比较输入或窗口时，应统一开关及训练预算。暂不在验证选模后用全部 34 人重新训练。
+
+## 运行、恢复与复核
+
+在现有 PyTorch 环境中，从项目根目录执行。先填写真实 `data_dir`；单卡服务器用 `device="cuda:0"`，本地无 GPU 检查使用 cpu。GPU 不可用会明确报错。
 
 ```powershell
-python -u -m smoke.gpu.check
-python -u train.py
-# 训练结束会自动测试；需要重新复核模型时可执行：
-python -u evaluate.py
+python -u -m smoke.experiments.check  # 无原始数据依赖；新实验功能的 CPU 回归检查
+python -u -m smoke.gpu.check          # 合成数据，实际检查可见 CPU/GPU
+python -u train.py                   # 基础模型；结束自动测试
+python -u -m fb.train                # FB 模型；需要时单独启动
 ```
 
-若训练中断则可重新运行，会自动断点继训。
+可用现有 requirements.txt 准备环境；运行前检查 `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`。本次不自动提交服务器任务。
 
-设备检查使用合成数据，对 CPU 及所有可见 GPU 分别测试两个模型的前向/反向、评估和断点恢复；无正式训练。
-结果位于 `smoke/gpu/results/checks.json`。若环境无 GPU 时明确记录 CUDA 检查为 SKIPPED。
+输出路径自动隔离为：
 
-`device="cuda:1"` 使用第二张显卡；`device="cpu"` 使用 CPU。单个进程仅使用所选的一张卡，不会自动双卡分摊 35 折。
-如需同时训练两个模型，可在启动前把基础模型设置为 cuda:0，把 `fb/config.py` 中的 FB 设置为 cuda:1，再分别运行两个入口。
+```text
+results/<experiment>/<input_type>/<duration>s/<fixed或early>/
+  report.md, summary.csv              # 总进度与统计
+  reproducibility/plan.json
+  S01_seed2026/
+    report.md, metrics.csv, training.png, confusion.png
+    reproducibility/
+      settings.json                  # 全量配置、实际被试名单、形状/参数量
+      selection.json                 # 各阶段实际轮数、采用轮次、停止原因
+      history.csv                    # 训练/训练监测/独立验证损失与准确率、耗时
+      checkpoint.pt                  # 模型、优化器、阶段、早停状态、随机状态
+      data_audit.json, predictions.csv, status.json, training.log
+      source/                        # 源码快照
+```
 
-设置fb/config.py内的额外参数后（剩余参与继承于SSVEPformer.config），启动训练FB-SSVEPformer：
+例如 `results/ssvepformer_experiments/amplitude/0.5s/early/`。更换输入、窗口、早停开关自动分目录；改变学习率、轮数上限等其他训练设置要更换 experiment，以免与旧断点混用。N/M 可以扩展，已完成项跳过。
+
+训练曲线蓝线是训练批次（Dropout ON），橙线是固定训练子集监测（Dropout OFF），开启早停才有独立验证集绿线。报告区分最后执行轮次和最终采用轮次；FB 按阶段绘图。测试集不绘制逐轮曲线。
+
+每 5 轮、STOP 请求、早停触发及阶段完成都会保存 checkpoint。完成的 checkpoint.model 是选中的最终权重；未完成时同时保存最新训练状态和当前最佳权重，恢复耐心计数与随机状态。重新执行相同训练命令即可恢复。Ctrl+C 使用最近一次已保存状态，可能重算最多约 5 轮。
+
+在计划或单折的 reproducibility 目录创建 `STOP`，会在 epoch 边界保存并停止整个计划；恢复前删除 STOP。例如：
 
 ```powershell
-python -u -m fb.train
-python -u -m fb.evaluate
+New-Item -Path .\results\ssvepformer_experiments\amplitude\0.5s\early\reproducibility\STOP -ItemType File
 ```
 
-两模型使用独立结果目录；不要同时对同一个实验目录训练和评估。
+重新复核用 `python -u evaluate.py` 或 `python -u -m fb.evaluate`。可在对应配置填写 evaluation_checkpoint 指定单模型；服务器数据迁移后填写 evaluation_data_dir。模型输入、窗口、早停状态从 checkpoint 读取。新旧数据路径或推理设备不同、以及旧格式 checkpoint 的复核，写入 checkpoint 旁的 reevaluation 目录。
 
-## 输入特征对比
+旧结果、缓存和 checkpoint 保留；本次代码变更后不接续旧格式训练断点，新实验从头训练。旧 checkpoint 可显式指定路径复核；FB 旧数据摘要与当前实现不一致时，需要显式填写 evaluation_data_dir。已完成旧实验若要完全按当时程序复核，可使用其 source 快照。
 
-SSVEPformer 修改 `config.py`，FB 修改 `fb/config.py` 中的 `input_type`。两者各自选择，互不跟随。
-保持 N=35、M=3、seed=2026、duration=1.0、batch_size=128 及其他训练设置一致。输入变化时重新初始化训练，不载入另一种输入的权重。
+单次报告 ACC、ITR；总报告先逐种子计算被试间均值与样本标准差，全部完成后再统计种子间变化。N×M 个结果不视为相互独立的样本。
 
-| input_type | 含义 | 单个子网输入 | SSVEPformer 参数量 | 三子带 FB 参数量 |
-|---|---|---|---:|---:|
-| `complex` | 每个电极内按 `[Re, Im]` 沿特征轴拼接，原实验 | 9×562 | 3,099,184 | 9,297,555 |
-| `time` | 滤波后裁取时域，不补零、不 FFT | 9×250 | 1,239,664 | 3,718,995 |
-| `complex_channels` | `[Re(CH1..CH9), Im(CH1..CH9)]` 沿通道轴拼接 | 18×281 | 2,681,726 | 8,045,181 |
-
-例如先设 `input_type: str = "time"`，运行 `python -u train.py` 或 `python -u -m fb.train`；完成后改为 `"complex_channels"` 再运行相同命令即可。
-两种新增实验都用原来的 35 折、2026–2028 三个种子。现有 `results_server/` 中已完成的 complex 结果直接作基线，本次不会重新训练或移动它们。
-当前配置保留 complex 默认值；启动新增实验前请显式选择 time 或 complex_channels。
-
-原实现是在 `data.py` 的预处理阶段完成实虚拼接并缓存。现在仍把频域的基准缓存存成每电极 `[Re, Im]`，每折划分后由 `network_input` 一次性转换成网络所需布局；训练与评估共用转换，不在每个 batch 重复 FFT。
-complex 和 complex_channels 共用同一份频域缓存。time 使用独立的滤波后时域缓存，保持原微伏数值，不新增全局归一化或拟合统计量。
-FB 使用自己的子带滤波缓存；每个子带内采用相同转换，不混合子带轴。第一次运行新版会因处理代码摘要变化建立新缓存，以后各折/种子复用。
-
-采用先全部实部、后全部虚部的通道顺序，便于检查与逆变换。交错顺序只是固定通道置换：首层为覆盖全部输入通道的 1×1 卷积，适当置换权重后两种顺序的表达能力相同，但相同种子下不保证数值训练轨迹一致。
-沿通道拼接完整保留原来的复频谱数值，没有新增/丢弃相位信息；改变的是网络怎样混合实虚部。
-`channels` 始终是 9 个实际电极，`input_channels` 和 `features` 自动推导。通道组合保持 2×输入通道数规则，因此三种输入的输出通道为 18、18、36；LayerNorm、MLP 与分类头尺寸随之适配。
-这不是参数量严格匹配的对照：表示方式改变也改变了模型参数量和卷积轴的含义，应结合上述形状与参数量解读，不能只把差异归因为信息量。暂不实现幅度谱或 b/a。
-
-正式论文表 7（Dataset 2，1 秒）的时域 ACC 为 71.21 ± 23.38% / 74.55 ± 23.52%，复频谱为 80.40 ± 20.45% / 83.19 ± 18.87%（依次为 SSVEPformer / FB）。表 7 没有给出 ITR。
-论文的 ± 表示被试间差异，应与本项目逐种子的 35 被试统计对照；三种子均值的 ± 是种子间变化，两者不可混用。
-
-新版输出路径为 `results/<experiment>/<input_type>/Sxx_seedxxxx/`，总报告在 `<input_type>/report.md`。模型配置、参数量和输入形状记录在各折 `reproducibility/settings.json`；训练日志及单折报告也显示形状和参数量。
-评估输入类型从 checkpoint 读取，不会随当前 input_type 覆盖保存模型的结构。旧 checkpoint 缺少该字段时按 complex 解读，复核结果另存 reevaluation；迁移后的服务器模型请显式配置 evaluation_checkpoint 与本地 evaluation_data_dir。
-本次实现变更后不接续旧版训练 checkpoint；旧结果与代码快照保留用于复现，新的对比从头训练。
-
-输入专项检查：`python -u -m smoke.inputs.check`。CPU 上检查三种输入、缓存复用、被试隔离、模型梯度及小型完整训练/评估；输出统一在 `smoke/inputs/results/`。
-
-## 项目结构
-
-主目录五个功能入口/模块，一个共用的设备辅助模块(runtime.py)：
+## 文件职责
 
 | 文件 | 职责 |
 |---|---|
-| `config.py` | 数据路径、N/M 调度、评估入口、窗口、模型和优化器参数 |
-| `data.py` | 数据审查、滤波、FFT、缓存、被试划分 |
-| `model.py` | SSVEPformer |
-| `train.py` | 训练、训练集监测、断点与日志 |
-| `evaluate.py` | 模型评估、ACC/ITR、CSV、报告和图片 |
-| `runtime.py` | 两模型及评估共用的 CPU/CUDA 设置、随机状态恢复、优化器动量迁移与设备记录 |
-
-runtime 保留为一个共用辅助模块，避免训练与评估的设备逻辑重复或相互导入。已删除耗时外推函数及两处调用，仅保留每 epoch 实测耗时。
-
-## 输出结构
-
-```text
-results/
-  ssvepformer_loso_cuda/<input_type>/
-    report.md                  # 完成进度、各个种子下的被试均值 ± 标准差
-    summary.csv                # 每折每种子一行关键测试指标
-    reproducibility/plan.json  # 当前调度计划
-    S01_seed2026/               # 每折/种子一个目录；后续为 S02_seed2026 等
-      report.md
-      metrics.csv
-      training.png
-      confusion.png
-      reproducibility/         # 配置、审查、模型与详细记录
-        settings.json
-        data_audit.json
-        history.csv
-        predictions.csv
-        checkpoint.pt
-        status.json
-        training.log
-        source/
-  previous_s01/                # 旧实现的结果，单独归档
-  ssvepformer_loso/            # 已停止的 CPU 实验，保留结果和 S26 断点
-smoke/
-  check.py
-  results/                     # 新的检查与初始化诊断
-  previous/                    # 旧冒烟脚本及结果
-```
-
-训练期间先生成 `training.png`，最终评估结束才生成测试指标、报告和混淆矩阵。
-已有匹配的预处理缓存会复用；仅数据源/预处理设置变化时重新预处理。不同折、种子共用逐试次独立计算的特征缓存，没有跨被试拟合统计量。
-每 5 epoch 覆盖保存一次 checkpoint；重新运行会跳过完成项、恢复中断项、从头训练未开始项。
-若要同配置完整重跑，请使用新的 experiment。
-如需在 epoch 结束处保存并停止整个计划，可在另一个 PowerShell 终端执行：
-
-```powershell
-New-Item G:\SSVEP\SSVEPformer\results\ssvepformer_loso_cuda\time\reproducibility\STOP -ItemType File
-```
-
-也支持在当前单折的 reproducibility 内创建 STOP；停止后不会继续下一折或下一个种子。
-恢复前删除对应 STOP，再运行 train.py。Ctrl+C 则恢复至最近定期保存的 checkpoint，可能重算最多约 5 个 epoch。
-
-总报告在每次完成后更新，未全部完成时标为“部分结果”。每个种子单独计算被试间均值 ± 样本标准差（ddof=1）。
-若 M>1，全部完成后还计算“每种子的被试均值”在种子间的均值 ± 标准差，不混淆两种变异来源。只有一个样本时不制造标准差。
-
-STOP 示例针对 time；其他输入换成对应的输入目录名。
+| config.py / fb/config.py | 配置：顶部常用选项，下方固定参数、推导尺寸和检查 |
+| data.py / fb/data.py | 预处理、缓存；基础模块共用表示转换与被试划分 |
+| model.py / fb/model.py | 原模型结构，按配置自动确定输入尺寸 |
+| train.py | 基础模型入口、共用训练流程、早停、最佳权重恢复、断点与 LOSO 调度 |
+| fb/train.py | FB 入口、子网预训练与联合训练调度；复用根 train.py 的训练流程 |
+| evaluate.py / fb/evaluate.py | 评估、报告、曲线和汇总 |
+| runtime.py | 设备、随机状态及优化器迁移 |
 
 ## 原 complex 输入的数据与模型口径
 
@@ -152,14 +122,14 @@ STOP 示例针对 time；其他输入换成对应的输入目录名。
 - FFT 除以实际窗口点数；实部后接虚部，输入为 `9×562`，无跨被试拟合归一化。
 - `Conv1d(9,18,1)` 通道组合；两个独立残差编码器；普通 `Conv1d(18,18,31)`；每通道共享 `Linear(562,562)`，保留 GELU；MLP 头为 `10116→240→40`。
 - LayerNorm 在每个空间通道的频谱维 F 上计算，沿用参考实现；论文正文的“channel dimension”未给出无歧义的 normalized_shape。
-- SGD：学习率 0.001、momentum 0.9、weight decay 0.001；batch 128、dropout 0.5，固定 100 epoch。
+- SGD：学习率 0.001、momentum 0.9、weight decay 0.001；batch 128、dropout 0.5，默认固定 100 epoch；开启早停时按验证集选模。
 
-每折留出被试的 240 个试次全部用于最终测试，其余 34 名被试的 8160 个试次全部用于训练。
-训练集监测使用每个训练被试的第一个 block，共 1360 个训练试次，关闭 Dropout；它仅用于观察拟合，**不是独立验证集**。
+关闭早停时，每折留出被试的 240 个试次全部用于最终测试，其余 34 名被试的 8160 个试次全部用于训练。开启早停时，改为 30 人训练、4 人独立验证、1 人测试。
+训练集监测使用每个训练被试的第一个 block，关闭早停时共 1360 个训练试次，开启时共 1200 个，关闭 Dropout；它仅用于观察拟合，**不是独立验证集**。
 在同一折中，每次监测固定使用相同的第一 block；第 1、5、10、…、100 轮监测。橙线只是连接这些实际测量点，没有另行拟合。
 关闭 Dropout 可消除随机丢弃特征带来的波动，观察完整网络的拟合能力；蓝线则边更新参数边累计所有训练批次，Dropout 开启，二者并非同口径。
 橙线也仅来自训练集的一个子集，往往高于蓝线，不能据此判断新被试上的泛化表现。
-不按监测值早停/选 checkpoint，每折的留出被试不参与该折优化和选模；固定最后一轮模型。
+不按训练子集监测值选模型。关闭早停时采用最后一轮；开启时仅按独立验证集交叉熵选模，测试被试不参与该折优化和选模。
 此前初始化诊断使用过 S2–S17 的部分数据。因此本次全被试 LOSO 属于已固定设置后的复现评估，不应表述为完全未经任何开发观察的独立外部验证。
 
 ITR 采用 40 类、`T=数据长度+0.5秒`，低于随机水平时记 0。
@@ -167,3 +137,5 @@ ITR 采用 40 类、`T=数据长度+0.5秒`，低于随机水平时记 0。
 已有 S1/2026：223/240，ACC 92.92%，ITR 183.14 bits/min。论文的 80.40% ACC 和 149.95 bits/min 是 35 名被试的平均结果；单折不能等同于完整复现。
 
 参考：[正式论文](https://doi.org/10.1016/j.neunet.2023.04.045)
+
+本次文件整理将 settings.py 合入对应 config.py、training.py 合入 train.py，并移除三个重复入口文件。上一版带早停的断点在配置、环境、数据和源码快照核对一致时可直接继续，保留原签名及随机状态；更早的训练协议仍按原兼容规则处理。

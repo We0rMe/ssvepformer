@@ -4,5 +4,6 @@ cache/
 results/
 results_server/
 tmp/
+.idea/
 __pycache__/
 *.pyc
