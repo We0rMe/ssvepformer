@@ -8,10 +8,10 @@ from config import Config, CONFIG as BASE
 class FBConfig(Config):
     # 常用实验选项：日常只需修改这一段。
     data_dir: Path = BASE.data_dir
-    experiment: str = "fb_ssvepformer_experiments"
-    input_type: str = "complex"  # complex / amplitude / time / complex_channels
+    experiment: str = "fb_ssvepformer_amplitude"
+    input_type: str = "amplitude"  # complex / amplitude / time / complex_channels
     duration: float = 1.0  # 秒，例如 0.5、1.0、2.0。
-    device: str = "cuda:0"  # 单卡服务器用 cuda:0；确有第二张可见卡时可改 cuda:1。
+    device: str = "cuda:1"  # 单卡服务器用 cuda:0；确有第二张可见卡时可改 cuda:1。
     N: int = 35
     M: int = 3
     seed: int = 2026
