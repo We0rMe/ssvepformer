@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent
 class Config:
     # 常用实验选项：日常只需修改这一段。
     data_dir: Path = Path(r"I:\jjh\SSVEP\data\benchmark")
-    experiment: str = "ssvepformer_complex"  # 修改其他训练设置时换实验名。
-    input_type: str = "complex"  # complex / amplitude / time / complex_channels
+    experiment: str = "ssvepformer_complex_channels"  # 修改其他训练设置时换实验名。
+    input_type: str = "complex_channels"  # complex / amplitude / time / complex_channels
     duration: float = 0.5  # 窗口秒数，例如 0.5、1.0、2.0；必须对应整数采样点。
     device: str = "cuda:1"
     N: int = 35  # 测试 S1…SN；每折训练候选始终来自其余 34 人。
