@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent
 class Config:
     # 常用实验选项：日常只需修改这一段。
     data_dir: Path = Path(r"I:\jjh\SSVEP\data\benchmark")
-    experiment: str = "ssvepformer_complex_channels"  # 修改其他训练设置时换实验名。
-    input_type: str = "complex_channels"  # complex / amplitude / time / complex_channels
+    experiment: str = "ssvepformer_time"  # 修改其他训练设置时换实验名。
+    input_type: str = "time"  # complex / amplitude / time / complex_channels
     duration: float = 0.5  # 窗口秒数，例如 0.5、1.0、2.0；必须对应整数采样点。
     device: str = "cuda:1"
     N: int = 35  # 测试 S1…SN；每折训练候选始终来自其余 34 人。
@@ -24,7 +24,7 @@ class Config:
     evaluation_checkpoint: Path | None = None  # 指定旧/新 checkpoint 路径可单独复核。
     evaluation_data_dir: Path | None = None  # 服务器数据迁移后指定本地路径。
 
-    # 固定实现参数：保留完整记录，一般无需调整。
+    # 固定实现参数
     subjects: int = 35  # 数据集固定属性：被试总数；控制折数请改 N，不要改此项。
     classes: int = 40  # 数据集固定属性：目标类别数，与 MAT 类别顺序一致。
     blocks: int = 6  # 数据集固定属性：每被试的 block 数，每 block 各类别一个试次。
