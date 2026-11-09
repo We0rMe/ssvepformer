@@ -9,7 +9,7 @@ class FBConfig(Config):
     data_dir: Path = BASE.data_dir
     experiment: str = "fb_ssvepformer_complex"
     input_type: str = "complex"  # complex / amplitude / time / complex_channels
-    duration: float = 0.8  # 秒，例如 0.5、1.0、2.0。
+    duration: float = 1.0  # 秒，例如 0.5、1.0、2.0。
     device: str = "cuda:1"
     N: int = 35
     M: int = 3
