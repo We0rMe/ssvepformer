@@ -4,13 +4,57 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+# 实验队列。() 运行原训练；("fusion", "noise") 依次完成实验三、四。
+COURSE_EXPERIMENTS = ()
+COURSE_NAME = "course_exp34_supplement"
+COURSE_WINDOW_SECONDS = 1.0
+SAVE_FIGURES = True
+
+@dataclass(frozen=True)
+class FusionStudy:
+    methods: tuple[str, ...]
+    projection_dim: int
+
+
+@dataclass(frozen=True)
+class NoiseStudy:
+    conditions: tuple[str, ...]
+    snr_db: tuple[float, ...]
+    repeats: int
+    seed: int
+
+
+# 实验三。complex 在每个电极内沿频率轴拼接实部和虚部。
+FUSION = FusionStudy(
+    methods=("score_tf", "feature_tf"),  # 两支分类概率等权平均；两支编码特征拼接
+    projection_dim=64,                  # 拼接前每个分支的投影维数
+)
+
+# 实验四。两项均使用 complex，各自与已完成的干净、有带通复频谱结果比较。
+NOISE = NoiseStudy(
+    conditions=("added_noise", "no_bandpass"),  # 可只保留其中一项
+    snr_db=(20., 10., 0.),  # 仅用于 added_noise；在留出测试试次上叠加高斯噪声
+    repeats=3,              # 每个 SNR 的噪声重复数；no_bandpass 只评估干净试次一次
+    seed=2026,
+)
+
+# 已完成的基础模型。若归档移动，改 ARCHIVE；若布局不同，改对应的路径模板。
+# 指定路径会严格加载，文件缺失会报错。某项设为 None 才允许按需训练该单支。
+ARCHIVE = ROOT / "results_server" / f"{round(COURSE_WINDOW_SECONDS * 1000)}ms"
+FOLD_CHECKPOINT = "S{subject:02d}_seed{seed}/reproducibility/checkpoint.pt"
+COURSE_CHECKPOINTS = {
+    "time": ARCHIVE / "ssvepformer_time/time" / FOLD_CHECKPOINT,
+    "complex": ARCHIVE / "ssvepformer_loso_cuda" / FOLD_CHECKPOINT,
+    "complex_no_bandpass": None,  # 已有无带通模型时可填入其模板
+}
+
 
 @dataclass(frozen=True)
 class Config:
     # 常用实验选项：日常只需修改这一段。
     data_dir: Path = Path(r"I:\jjh\SSVEP\data\benchmark")
-    experiment: str = "ssvepformer_time"  # 修改其他训练设置时换实验名。
-    input_type: str = "time"  # complex / amplitude / time / complex_channels
+    experiment: str = "ssvepformer_complex_channels"  # 修改其他训练设置时换实验名。
+    input_type: str = "complex_channels"  # complex / amplitude / time / complex_channels
     duration: float = 0.8  # 窗口秒数，例如 0.5、1.0、2.0；必须对应整数采样点。
     device: str = "cuda:1"
     N: int = 35  # 测试 S1…SN；每折训练候选始终来自其余 34 人。
