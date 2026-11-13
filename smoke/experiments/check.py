@@ -26,7 +26,7 @@ TYPES = ("complex", "amplitude", "time", "complex_channels")
 
 
 def tiny(fb=False, **kwargs):
-    cfg = replace(FB_CONFIG if fb else CONFIG, device="cpu", cpu_threads=1, N=1, M=1,
+    cfg = replace(FB_CONFIG if fb else CONFIG, device="cpu", cpu_threads=1, N=1, M=1, input_type="complex",
                   channels=("Oz",), frequency_range=(8., 8.4), duration=.024,
                   encoder_blocks=1, kernel_size=3, head_multiplier=1, spatial_multiplier=1,
                   epochs=6, batch_size=4, checkpoint_every=1, monitor_every=2,

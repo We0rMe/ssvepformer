@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from filelock import FileLock
 
-from evaluate import evaluate, itr, plt, summarize as summarize_base, write_csv, write_json, training_description
+from evaluate import test_saved_decoder, evaluate_test, TIMING_FIELDS, evaluate, itr, plt, summarize as summarize_base, write_csv, write_json, training_description
 from fb.config import CONFIG, FBConfig
-from fb.data import prepare_data, split_subjects
+from fb.data import prepare_data, split_subjects, preprocess
 from fb.model import FBSSVEPformer
 from runtime import configure_device, device_info
 
@@ -47,7 +47,8 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
               "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
               "duration_s": cfg.duration, "ACC_percent": round(test["acc_percent"], 4),
               "ITR_bits_min": round(itr(test["acc_percent"], cfg), 4),
-              "correct": test["correct"], "trials": test["total"]}
+              "correct": test["correct"], "trials": test["total"],
+              **{key: test[key] for key in TIMING_FIELDS if key in test}}
     write_csv(details / "predictions.csv", [
         {"block": i // cfg.classes + 1, "target": int(label) + 1,
          "frequency_hz": frequencies[int(label)], "prediction": int(prediction) + 1,
@@ -71,6 +72,7 @@ def save_results(cfg, model, history, test, train, predictions, labels, frequenc
 
 | 指标 | 结果 |
 |---|---:|
+| 单试次平均前向耗时 (ms，batch=1) | {format(test["forward_ms_batch1"], ".4f") if "forward_ms_batch1" in test else "未测量"} |
 | 测试 ACC | {test['acc_percent']:.2f}% |
 | 测试 ITR | {itr(test['acc_percent'], cfg):.2f} bits/min |
 | 正确 / 总试次 | {test['correct']} / {test['total']} |
@@ -101,9 +103,9 @@ def summarize(cfg, *, evaluation=False):
     return rows
 
 
-def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
+def evaluate_checkpoint(checkpoint, data_dir=None, device=None, *, collected=None, state=None, test_only=False):
     checkpoint = Path(checkpoint).resolve()
-    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    saved = state if state is not None else torch.load(checkpoint, map_location="cpu", weights_only=False)
     if saved.get("model_name") != "FB-SSVEPformer":
         raise ValueError("请提供 FB-SSVEPformer 的 checkpoint，不能使用基础模型 checkpoint")
     values = saved["config"].copy()
@@ -121,6 +123,8 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
         print(f"跳过未完成联合训练的模型：{checkpoint}", flush=True)
         return False
     selected_device = configure_device(cfg)
+    if test_only:
+        return test_saved_decoder(checkpoint, saved, cfg, FBSSVEPformer(cfg), preprocess, collected)
     features, audit = prepare_data(cfg)
     if data_dir is None and audit["cache_id"] != saved["cache_id"]:
         raise ValueError("原始数据/处理代码发生变化；独立复核请显式设置 evaluation_data_dir")
@@ -128,11 +132,13 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     model = FBSSVEPformer(cfg).to(selected_device)
     model.load_state_dict(saved["model"])
     train, _ = evaluate(model, x, y, cfg)
-    test, predictions = evaluate(model, test_x, test_y, cfg)
+    test, predictions = evaluate_test(model, test_x, test_y, cfg)
     same_context = data_dir is None and cfg.device == trained_device and saved.get("format_version") == 2
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, model, saved["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output, selections=saved.get("selections"))
+    if collected is not None:
+        collected.append({"checkpoint": str(checkpoint), **metric})
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir), "cache_id": audit["cache_id"],
                 "trained_device": trained_device, "evaluation_runtime": device_info(cfg)})
@@ -152,13 +158,16 @@ def main(cfg=CONFIG):
     cfg.validate()
     details = cfg.output_dir / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
+    measured = []
     with FileLock(str(details / "campaign.lock"), timeout=0):
         count = 0
         for single in cfg.runs():
             checkpoint = single.output_dir / "reproducibility" / "checkpoint.pt"
             if checkpoint.exists():
                 with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-                    count += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
+                    count += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device, collected=measured)
+        if measured:
+            write_csv(cfg.output_dir / "latency_summary.csv", measured)
         summarize(cfg, evaluation=True)
     print(f"FB 已复核 {count} / {cfg.N * cfg.M} 个模型，其余尚未完成。", flush=True)
 

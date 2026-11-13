@@ -2,6 +2,7 @@
 
 import csv
 import json
+import time
 import math
 import os
 from pathlib import Path
@@ -19,11 +20,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def replace_output(temp, path):
+    # Windows 上读取进度文件的程序可能短暂占用目标。保留原子替换并有限重试。
+    for attempt in range(6):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 5:
+                raise
+            time.sleep(.05 * (attempt + 1))
+
+
 def write_json(path, value):
     path = Path(path)
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
-    os.replace(temp, path)
+    replace_output(temp, path)
 
 
 def write_csv(path, rows, fields=None):
@@ -33,7 +46,7 @@ def write_csv(path, rows, fields=None):
         writer = csv.DictWriter(stream, fieldnames=fields or list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(temp, path)
+    replace_output(temp, path)
 
 
 def itr(accuracy, cfg):
@@ -65,6 +78,37 @@ def evaluate(model, x, y, cfg):
     correct = int((predictions == y.cpu().numpy()).sum())
     return {"loss": loss.item() / len(y), "acc_percent": 100 * correct / len(y),
             "correct": correct, "total": len(y)}, predictions
+
+
+@torch.inference_mode()
+def evaluate_test(model, x, y, cfg):
+    """批量评估分类结果，然后测量同一模型在设备上的单试次前向延迟。"""
+    metrics, predictions = evaluate(model, x, y, cfg)
+    device = next(model.parameters()).device
+    inputs = x.to(device)
+    warmup = 10
+    for i in range(warmup):
+        j = i % len(inputs)
+        model(inputs[j:j + 1])
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = 0
+    for trial in inputs.split(1):
+        start = time.perf_counter_ns()
+        model(trial)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed += time.perf_counter_ns() - start
+    metrics["forward_ms_batch1"] = elapsed / (1e6 * len(inputs))
+    metrics["timing_trials"] = len(inputs)
+    metrics["timing_warmup"] = warmup
+    metrics["timing_device"] = str(device)
+    print(f"单试次平均前向耗时 {metrics['forward_ms_batch1']:.4f} ms "
+          f"({device}, batch=1, n={len(inputs)})", flush=True)
+    return metrics, predictions
+
+
+TIMING_FIELDS = ("forward_ms_batch1", "timing_trials", "timing_warmup", "timing_device")
 
 
 def plot_training(history, directory):
@@ -115,7 +159,8 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
               "test_subject": f"S{cfg.test_subject}", "seed": cfg.seed,
               "duration_s": cfg.duration, "ACC_percent": round(test["acc_percent"], 4),
               "ITR_bits_min": round(itr(test["acc_percent"], cfg), 4),
-              "correct": test["correct"], "trials": test["total"]}
+              "correct": test["correct"], "trials": test["total"],
+              **{key: test[key] for key in TIMING_FIELDS if key in test}}
     records = [{"block": i // cfg.classes + 1, "target": int(y) + 1,
                 "frequency_hz": frequencies[int(y)], "prediction": int(p) + 1,
                 "correct": int(y == p)} for i, (y, p) in enumerate(zip(labels, predictions))]
@@ -145,6 +190,7 @@ def save_results(cfg, history, test, train, predictions, labels, frequencies, ou
 
 | 指标 | 结果 |
 |---|---:|
+| 单试次平均前向耗时 (ms，batch=1) | {format(test["forward_ms_batch1"], ".4f") if "forward_ms_batch1" in test else "未测量"} |
 | 测试 ACC | {test['acc_percent']:.2f}% |
 | 测试 ITR | {itr(test['acc_percent'], cfg):.2f} bits/min |
 | 正确 / 总试次 | {test['correct']} / {test['total']} |
@@ -195,7 +241,7 @@ def summarize(cfg, *, evaluation=False):
                 raise ValueError(f"{single.output_dir.name} 的设置不匹配，请使用新的 experiment")
         rows.append(row)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    fields = ["model", "input_type", "test_subject", "seed", "duration_s", "ACC_percent", "ITR_bits_min", "correct", "trials"]
+    fields = ["model", "input_type", "test_subject", "seed", "duration_s", "ACC_percent", "ITR_bits_min", "correct", "trials", *TIMING_FIELDS]
     write_csv(cfg.output_dir / "summary.csv", rows, fields=fields)
     complete = len(rows) == cfg.N * cfg.M
     lines = ["# SSVEPformer · LOSO 汇总", "",
@@ -231,13 +277,52 @@ def summarize(cfg, *, evaluation=False):
     return rows
 
 
-def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
-    from data import prepare_data, split_subjects
+def save_checkpoint_test(checkpoint, cfg, model, x, labels, model_name, input_type, collected):
+    """独立复测只使用留出被试，输出位置与原训练报告隔离。"""
+    test, pred = evaluate_test(model, x, labels, cfg)
+    metric = {"model": model_name, "input_type": input_type, "test_subject": f"S{cfg.test_subject}",
+              "seed": cfg.seed, "duration_s": cfg.duration, "ACC_percent": test["acc_percent"],
+              "ITR_bits_min": itr(test["acc_percent"], cfg), "correct": test["correct"],
+              "trials": len(labels), **{k: test[k] for k in TIMING_FIELDS}}
+    out = checkpoint.parent / "reevaluation"
+    out.mkdir(exist_ok=True)
+    write_csv(out / "metrics.csv", [metric])
+    write_csv(out / "predictions.csv", [
+        {"block": i // cfg.classes + 1, "target": int(y) + 1, "prediction": int(p) + 1}
+        for i, (y, p) in enumerate(zip(labels, pred))])
+    write_json(out / "evaluation.json", {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir),
+                                         "runtime": device_info(cfg), **metric})
+    if collected is not None:
+        collected.append({"checkpoint": str(checkpoint), **metric})
+    print(f"{model_name} S{cfg.test_subject:02d} seed={cfg.seed}: {out / 'metrics.csv'}", flush=True)
+    return True
+
+
+def test_saved_decoder(checkpoint, state, cfg, model, preprocess, collected):
+    from data import network_input, read_subject
+    model.load_state_dict(state["model"])
+    model.to(cfg.device)
+    raw = read_subject(cfg.test_subject, cfg)
+    x = torch.from_numpy(network_input(preprocess(raw, cfg), cfg))
+    y = torch.arange(cfg.classes).repeat(cfg.blocks)
+    return save_checkpoint_test(checkpoint, cfg, model, x, y,
+                                state.get("model_name", "SSVEPformer"), cfg.input_type, collected)
+
+
+def evaluate_checkpoint(checkpoint, data_dir=None, device=None, *, collected=None, test_only=False):
+    from data import prepare_data, split_subjects, preprocess
     from model import SSVEPformer
     checkpoint = Path(checkpoint).resolve()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if state.get("model_name", "SSVEPformer") != "SSVEPformer":
-        raise ValueError("FB 模型请使用 python -m fb.evaluate")
+    name = state.get("model_name", "SSVEPformer")
+    if name == "FB-SSVEPformer":
+        from fb.evaluate import evaluate_checkpoint as evaluate_fb
+        return evaluate_fb(checkpoint, data_dir, device, collected=collected, state=state, test_only=test_only)
+    if name.startswith("Course-"):
+        from course.runner import evaluate_course_checkpoint
+        return evaluate_course_checkpoint(checkpoint, state, data_dir, device, collected)
+    if name != "SSVEPformer":
+        raise ValueError(f"不支持的模型 {name}")
     values = state["config"].copy()
     values.setdefault("input_type", "complex")  # 旧模型始终使用原始复频谱，不能被当前输入选择覆盖。
     trained_device = values.get("device", "cpu")
@@ -254,6 +339,8 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
         return False
     cfg.validate()
     selected_device = configure_device(cfg)
+    if test_only:
+        return test_saved_decoder(checkpoint, state, cfg, SSVEPformer(cfg), preprocess, collected)
     features, audit = prepare_data(cfg)
     if data_dir is None and state.get("format_version") == 2 and audit["cache_id"] != state["cache_id"]:
         raise ValueError("原始数据/处理代码发生变化；独立复核请显式设置 evaluation_data_dir")
@@ -261,13 +348,15 @@ def evaluate_checkpoint(checkpoint, data_dir=None, device=None):
     model = SSVEPformer(cfg).to(selected_device)
     model.load_state_dict(state["model"])
     train, _ = evaluate(model, x, y, cfg)
-    test, predictions = evaluate(model, test_x, test_y, cfg)
+    test, predictions = evaluate_test(model, test_x, test_y, cfg)
     # 更换数据目录或推理设备的复核另存，避免替换原实验的正式指标。
     same_context = data_dir is None and cfg.device == trained_device and state.get("format_version") == 2
     output = checkpoint.parent.parent if same_context else checkpoint.parent / "reevaluation"
     metric = save_results(cfg, state["history"], test, train, predictions,
                           test_y.numpy(), audit["target_frequencies"], output=output,
                           parameters=sum(p.numel() for p in model.parameters()), selections=state.get("selections"))
+    if collected is not None:
+        collected.append({"checkpoint": str(checkpoint), **metric})
     write_json(output / "reproducibility" / "evaluation.json",
                {"checkpoint": str(checkpoint), "data_dir": str(cfg.data_dir),
                 "test_subject": cfg.test_subject, "epoch": state["epoch"], "cache_id": audit["cache_id"],
@@ -289,6 +378,7 @@ def main(cfg=CONFIG):
     details = cfg.output_dir / "reproducibility"
     details.mkdir(parents=True, exist_ok=True)
     completed, missing = 0, 0
+    measured = []
     with FileLock(str(details / "campaign.lock"), timeout=0):
         for single in cfg.runs():
             checkpoint = single.output_dir / "reproducibility" / "checkpoint.pt"
@@ -296,10 +386,33 @@ def main(cfg=CONFIG):
                 missing += 1
                 continue
             with FileLock(str(checkpoint.parent / "run.lock"), timeout=0):
-                completed += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device)
+                completed += evaluate_checkpoint(checkpoint, cfg.evaluation_data_dir, cfg.device, collected=measured)
+        if measured:
+            write_csv(cfg.output_dir / "latency_summary.csv", measured)
         summarize(cfg, evaluation=True)
     print(f"复核完成 {completed} 个模型；{missing} 个尚无 checkpoint。", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="复测单个 checkpoint 或递归复测一个实验目录")
+    parser.add_argument("--checkpoint", type=Path, help="checkpoint.pt 或包含多折 checkpoint.pt 的目录")
+    parser.add_argument("--data-dir", type=Path, help="复测时使用的 Benchmark 路径")
+    parser.add_argument("--device", help="如 cpu、cuda:0")
+    args = parser.parse_args()
+    if args.checkpoint is None:
+        if args.device or args.data_dir:
+            parser.error("--data-dir 和 --device 与 --checkpoint 一起使用")
+        main()
+    else:
+        target = args.checkpoint.resolve()
+        paths = sorted(target.rglob("checkpoint.pt")) if target.is_dir() else [target]
+        if not paths or not all(p.is_file() for p in paths):
+            parser.error("指定路径下没有 checkpoint")
+        rows = []
+        for path in paths:
+            with FileLock(str(path.parent / "run.lock"), timeout=0):
+                evaluate_checkpoint(path, args.data_dir, args.device or CONFIG.device, collected=rows, test_only=True)
+            if target.is_dir() and rows:
+                write_csv(target / "latency_summary.csv", rows)
+

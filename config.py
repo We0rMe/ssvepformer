@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 # 实验队列。() 运行原训练；("fusion", "noise") 依次完成实验三、四。
-COURSE_EXPERIMENTS = ()
+COURSE_EXPERIMENTS = ("fusion", "noise")
 COURSE_NAME = "course_exp34_supplement"
 COURSE_WINDOW_SECONDS = 1.0
 SAVE_FIGURES = True
@@ -38,8 +38,8 @@ NOISE = NoiseStudy(
     seed=2026,
 )
 
-# 已完成的基础模型。若归档移动，改 ARCHIVE；若布局不同，改对应的路径模板。
-# 指定路径会严格加载，文件缺失会报错。某项设为 None 才允许按需训练该单支。
+# 已完成的基础模型,指定路径会严格加载，文件缺失会报错。
+# 某项设为 None 才允许按需训练该单支。
 ARCHIVE = ROOT / "results_server" / f"{round(COURSE_WINDOW_SECONDS * 1000)}ms"
 FOLD_CHECKPOINT = "S{subject:02d}_seed{seed}/reproducibility/checkpoint.pt"
 COURSE_CHECKPOINTS = {

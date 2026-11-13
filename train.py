@@ -17,7 +17,7 @@ from filelock import FileLock
 
 from config import CONFIG, ROOT
 from data import prepare_data, split_subjects, subject_partition, validation_data
-from evaluate import evaluate, plot_training, save_results, summarize, write_csv, write_json
+from evaluate import evaluate_test, evaluate, plot_training, save_results, summarize, write_csv, write_json
 from model import SSVEPformer
 from runtime import capture_rng, configure_device, device_info, optimizer_to, restore_rng
 
@@ -210,6 +210,11 @@ def _source_identity(directory, fb=False):
             node.body = [n for n in node.body if not (
                 isinstance(n, ast.ImportFrom) and n.module == "train" and
                 [(a.name, a.asname) for a in n.names] == [("train_epoch", None)])]
+        if isinstance(node, ast.FunctionDef) and node.name == "run_single":
+            # 训练结束后的附加计时不改变可恢复的训练过程。
+            for call in ast.walk(node):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "evaluate_test":
+                    call.func.id = "evaluate"
         return hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
 
     code = nodes("train.py")
@@ -331,7 +336,7 @@ def run_single(cfg, features, audit, stop_path):
                 raise InterruptedError("STOP：训练已保存，最终测试尚未执行")
             # 完成选模后，测试被试才首次进入模型。
             train_metrics, _ = evaluate(model, x, y, cfg)
-            test_metrics, predictions = evaluate(model, test_x, test_y, cfg)
+            test_metrics, predictions = evaluate_test(model, test_x, test_y, cfg)
             metric = save_results(cfg, history, test_metrics, train_metrics, predictions,
                                   test_y.numpy(), audit["target_frequencies"], parameters=parameters, selections=selections)
             write_json(status_path, {"state": "complete", "epoch": history[-1]["epoch"], "epochs": cfg.epochs, "selections": selections})
@@ -379,4 +384,9 @@ def run(cfg=CONFIG):
 
 
 if __name__ == "__main__":
-    run()
+    from config import COURSE_EXPERIMENTS
+    if COURSE_EXPERIMENTS:
+        from course.runner import run_experiments
+        run_experiments()
+    else:
+        run()

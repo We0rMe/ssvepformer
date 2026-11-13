@@ -14,7 +14,7 @@ from filelock import FileLock
 
 from config import ROOT
 from data import subject_partition, validation_data
-from evaluate import evaluate, write_csv, write_json
+from evaluate import evaluate_test, evaluate, write_csv, write_json
 from train import seed_everything, train_epoch, fit_stages, run_identity, manifest_matches
 from fb.config import CONFIG
 from fb.data import prepare_data, split_subjects
@@ -103,7 +103,7 @@ def run_single(cfg, features, audit, stop_path):
                 raise InterruptedError("STOP：联合训练已保存，最终测试尚未执行")
             # 所有子网预训练和联合训练均结束后，才使用留出被试进行最终测试。
             train_metrics, _ = evaluate(model, x, y, cfg)
-            test_metrics, predictions = evaluate(model, test_x, test_y, cfg)
+            test_metrics, predictions = evaluate_test(model, test_x, test_y, cfg)
             metric = save_results(cfg, model, history, test_metrics, train_metrics, predictions,
                                   test_y.numpy(), audit["target_frequencies"], selections=selections)
             write_json(details / "status.json", {"state": "complete", "stage": "joint", "epoch": history[-1]["epoch"], "selections": selections})
