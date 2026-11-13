@@ -19,8 +19,8 @@ from runtime import configure_device, device_info
 
 
 class FeatureFusion(nn.Module):
-    """两个独立编码器 → 沿时间/频点平均池化 → 各投影 D 维 → 拼接分类。"""
-    def __init__(self, cfg, kinds=("time", "complex"), projection_dim=64):
+    """各分支保留时间或频点位置，展平后投影、归一化，再拼接分类。"""
+    def __init__(self, cfg, kinds=("time", "complex"), projection_dim=64, *, legacy_pool=False):
         super().__init__()
         self.lengths = [replace(cfg, input_type=k).features for k in kinds]
         self.encoders, self.projections = nn.ModuleList(), nn.ModuleList()
@@ -28,8 +28,14 @@ class FeatureFusion(nn.Module):
             c = replace(cfg, input_type=kind)
             net = SSVEPformer(c)
             self.encoders.append(nn.Sequential(net.channel_combination, net.encoder))
-            self.projections.append(nn.Sequential(nn.Linear(c.input_channels * c.spatial_multiplier,
-                                                             projection_dim), nn.GELU(), nn.Dropout(c.dropout)))
+            channels = c.input_channels * c.spatial_multiplier
+            if legacy_pool:
+                projection = nn.Sequential(nn.Linear(channels, projection_dim), nn.GELU(), nn.Dropout(c.dropout))
+            else:
+                projection = nn.Sequential(nn.Linear(channels * c.features, projection_dim),
+                                           nn.LayerNorm(projection_dim), nn.GELU(), nn.Dropout(c.dropout))
+            self.projections.append(projection)
+        self.legacy_pool = legacy_pool
         self.classifier = nn.Linear(2 * projection_dim, cfg.classes)
         for layer in [*(p[0] for p in self.projections), self.classifier]:
             nn.init.normal_(layer.weight, std=cfg.init_std)
@@ -37,9 +43,12 @@ class FeatureFusion(nn.Module):
 
     def forward(self, x):
         parts = torch.split(x, self.lengths, dim=-1)
-        pooled = [projection(encoder(part).mean(-1))
-                  for part, encoder, projection in zip(parts, self.encoders, self.projections)]
-        return self.classifier(torch.cat(pooled, dim=1))
+        branches = []
+        for part, encoder, projection in zip(parts, self.encoders, self.projections):
+            encoded = encoder(part)
+            features = encoded.mean(-1) if self.legacy_pool else encoded.flatten(1)
+            branches.append(projection(features))
+        return self.classifier(torch.cat(branches, dim=1))
 
 
 class ScoreFusion(nn.Module):
@@ -162,7 +171,7 @@ def train_model(cfg, kinds, folder, get_feature, projection_dim, should_stop):
     features = {kind: get_feature(kind, cfg.bandpass) for kind in set(kinds)}
     x, y, _, _ = combined(features, c, kinds)
     write_json(details / "protocol.json", {"config": c.to_dict(), "kinds": kinds,
-               "projection_dim": projection_dim,
+               "projection_dim": projection_dim, "feature_head": "flatten_layernorm" if len(kinds) > 1 else None,
                "signature": signature, "parameters": sum(p.numel() for p in model.parameters())})
     cache_id = hashlib.sha256(json.dumps({k: features[k].shape for k in kinds}, sort_keys=True).encode()).hexdigest()
     history, selections = fit_stages(model, x, y, c, details, signature, cache_id,
@@ -251,8 +260,8 @@ def validate_study(task, study):
     if task == "fusion":
         if not study.methods or len(set(study.methods)) != len(study.methods) or set(study.methods) - BRANCHES.keys():
             raise ValueError("FusionStudy.methods 含重复或不支持的方法，或没有选择方法")
-        if study.projection_dim < 1:
-            raise ValueError("projection_dim 必须为正整数")
+        if study.projection_dim < 2:
+            raise ValueError("带 LayerNorm 的 projection_dim 至少为 2")
         return len(study.methods)
     conditions = set(study.conditions)
     if not conditions or len(conditions) != len(study.conditions) or conditions - {"added_noise", "no_bandpass"}:
@@ -357,7 +366,7 @@ def evaluate_course_checkpoint(path, state, data_dir, device, collected):
         model = SSVEPformer(replace(cfg, input_type=kinds[0]))
     else:
         width = state["model"]["classifier.weight"].shape[1] // 2
-        model = FeatureFusion(cfg, kinds, width)
+        model = FeatureFusion(cfg, kinds, width, legacy_pool="feature_head" not in info)
     model.load_state_dict(state["model"])
     model.to(cfg.device)
     raw = read_subject(cfg.test_subject, cfg)

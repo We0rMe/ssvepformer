@@ -120,7 +120,7 @@ python -u evaluate.py --checkpoint results_server/1000ms --data-dir "G:/SSVEP/da
 | FUSION.methods | 同一试次的两支输出如何融合 | 权重来源 |
 |---|---|---|
 | score_tf | 对时域和复频谱单支分别做 softmax，取两组 40 类概率的算术平均，再选最大概率类别 | 加载同折、同种子的两个单支 checkpoint |
-| feature_tf | 两个编码器各自池化并投影至 64 维，拼接成 128 维后输入共同分类头 | 随机初始化，联合训练双支和分类头，默认固定 100 轮 |
+| feature_tf | 两个编码器各自保留全部位置、展平并投影至 64 维，经 LayerNorm、GELU 和 Dropout，拼接成 128 维后输入共同分类头 | 随机初始化，联合训练双支和分类头，默认固定 100 轮 |
 
 两种融合都与前两项已有单支结果比较。两种融合之间的差值也按同一被试和种子计算。特征融合改变了分类头和训练方式，这些差异应计入结果解释。
 
@@ -151,7 +151,7 @@ results_server/1000ms/ssvepformer_loso_cuda/S01_seed2026/reproducibility/checkpo
 
 ## 结果与图像
 
-默认结果目录为 `results/course_exp34_supplement/1s/`。fusion/ 和 noise/ 各自包含 metrics.csv、summary.csv、逐试次预测及 progress.json。metrics.csv 的 condition 标识比较条件，checkpoints 记录实际权重路径。summary.csv 先对同一折、同一个训练种子的噪声重复取平均，再对训练种子取平均，最后对被试求均值。干净带通的基准取自上面复频谱归档各折的 metrics.csv。
+默认结果目录为 `results/course_exp34_supplement_v2/1s/`。fusion/ 和 noise/ 各自包含 metrics.csv、summary.csv、逐试次预测及 progress.json。metrics.csv 的 condition 标识比较条件，checkpoints 记录实际权重路径。summary.csv 先对同一折、同一个训练种子的噪声重复取平均，再对训练种子取平均，最后对被试求均值。干净带通的基准取自上面复频谱归档各折的 metrics.csv。
 
 SAVE_FIGURES=True 时保存融合配对图、加噪准确率曲线，以及 S01 第一块、第一目标、Oz 电极在加噪前后的波形和幅度谱。图像保存为 PNG 和 SVG，信号示例另附 NPZ。训练期间可在上述窗口目录或任务目录创建 STOP；删除标记并用同一设置重启即可继续。
 
