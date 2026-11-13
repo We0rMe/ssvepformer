@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent
 
 # 实验队列。() 运行原训练；("fusion", "noise") 依次完成实验三、四。
 COURSE_EXPERIMENTS = ("fusion", "noise")
-COURSE_NAME = "course_exp34_supplement"
+COURSE_NAME = "course_exp34_supplement_v2"
 COURSE_WINDOW_SECONDS = 1.0
 SAVE_FIGURES = True
 
